@@ -179,10 +179,7 @@ type freshAlbumJSON struct {
 	TrackIDs    []string `json:"track_ids"`
 }
 
-// --- mix command JSON shapes -------------------------------------------
-// (bd-bqx) Self-contained block: shape used by `spot mix`. Kept near the
-// other discovery shapes to make merges with parallel discovery work
-// (daily/deeper/rabbithole) easy to land alongside.
+// --- discovery JSON shapes (mix, daily, deeper, rabbithole) ------------
 
 // mixTrackJSON is the JSON shape for one row in `spot mix --json`.
 type mixTrackJSON struct {
@@ -201,7 +198,17 @@ type mixResultJSON struct {
 	Tracks []mixTrackJSON `json:"tracks"`
 }
 
-// --- end mix command JSON shapes ---------------------------------------
+// dailyTrackJSON is the JSON shape used by `spot daily`. One row per
+// suggested track in the order Daily returns them (love-boosted first,
+// then long-term rank).
+type dailyTrackJSON struct {
+	Rank    int    `json:"rank"`
+	TrackID string `json:"track_id"`
+	Title   string `json:"title"`
+	Artist  string `json:"artist"`
+	Album   string `json:"album,omitempty"`
+}
+
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -1032,8 +1039,6 @@ every track on each fresh album.`,
 	root.AddCommand(freshCmd)
 
 	// --- mix command (bd-bqx) -----------------------------------------
-	// Self-contained block — kept next to freshCmd so merges with
-	// parallel discovery agents (daily/deeper/rabbithole) are easy.
 
 	var (
 		mixLength        int
@@ -1121,7 +1126,76 @@ emitting it; omit --zone to just print the list.`,
 	mixCmd.Flags().IntVar(&mixExcludeRecent, "exclude-recent", 7, "drop tracks played within the last N days (0 disables)")
 	root.AddCommand(mixCmd)
 
-	// --- end mix command ----------------------------------------------
+	// --- daily command (bd-wiz) ---------------------------------------
+
+	var dailyZone string
+	var dailyLength int
+	dailyCmd := &cobra.Command{
+		Use:   "daily",
+		Short: "Top long-term tracks minus what you've heard recently",
+		Long: `Spotify-Daily replacement: surface long-term top tracks the user
+has not played in the last 30 days, with local feedback applied.
+
+Tracks marked "hate" or "skip-forever" via "spot feedback" are dropped.
+Tracks marked "love" are boosted to the front of the list. The remainder
+keeps its long-term-rank order.
+
+Pass --zone to queue the result on a Sonos zone via PlayTrackIDsViaSonos;
+omit to just print (or emit JSON with --json).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			tracks, err := spot.Daily(cmd.Context(), spot.DailyOptions{Length: dailyLength})
+			if err != nil {
+				return err
+			}
+			out := make([]dailyTrackJSON, 0, len(tracks))
+			for i, t := range tracks {
+				out = append(out, dailyTrackJSON{
+					Rank:    i + 1,
+					TrackID: t.TrackID,
+					Title:   t.Title,
+					Artist:  t.Artist,
+					Album:   t.Album,
+				})
+			}
+
+			if dailyZone != "" && len(tracks) > 0 {
+				ids := make([]string, 0, len(tracks))
+				for _, t := range tracks {
+					if t.TrackID != "" {
+						ids = append(ids, t.TrackID)
+					}
+				}
+				if len(ids) > 0 {
+					if err := spot.PlayTrackIDsViaSonos(cmd.Context(), dailyZone, ids); err != nil {
+						return err
+					}
+				}
+			}
+
+			return emit(out, func() error {
+				if len(out) == 0 {
+					fmt.Fprintln(os.Stderr, "no daily tracks (need top long-term tracks; try Spotify for a few weeks)")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "RANK\tARTIST\tTITLE")
+				for _, t := range out {
+					fmt.Fprintf(tw, "%d\t%s\t%s\n", t.Rank, t.Artist, t.Title)
+				}
+				if err := tw.Flush(); err != nil {
+					return err
+				}
+				if dailyZone != "" {
+					fmt.Printf("queued %d track(s) on %s\n", len(out), dailyZone)
+				}
+				return nil
+			})
+		},
+	}
+	dailyCmd.Flags().StringVar(&dailyZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
+	dailyCmd.Flags().IntVar(&dailyLength, "length", 20, "max number of tracks to return")
+	root.AddCommand(dailyCmd)
 
 	// --- end personalization commands ---------------------------------
 
