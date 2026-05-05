@@ -20,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/jefflaplante/spot"
 	"github.com/spf13/cobra"
@@ -573,7 +574,310 @@ Continuation (-c / --continue):
 	playCmd.Flags().BoolVarP(&continuePlay, "continue", "c", false, "after the seed track, queue more from the primary artist")
 	root.AddCommand(playCmd)
 
+	root.AddCommand(newFeedbackCmd())
+	root.AddCommand(newMarkCmd())
+	root.AddCommand(newHistoryCmd())
+	root.AddCommand(newStatsCmd())
+
 	if err := root.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}
+}
+
+// feedbackJSON is the JSON shape for `spot feedback`.
+type feedbackJSON struct {
+	Action  string `json:"action"`
+	Verdict string `json:"verdict"`
+	TrackID string `json:"track_id"`
+}
+
+// markJSON is the JSON shape for `spot mark`.
+type markJSON struct {
+	Action  string `json:"action"`
+	Note    string `json:"note"`
+	Zone    string `json:"zone,omitempty"`
+	TrackID string `json:"track_id"`
+}
+
+// historyTrackJSON is the cached-track sub-object on a history row.
+type historyTrackJSON struct {
+	TrackID  string `json:"track_id"`
+	Title    string `json:"title,omitempty"`
+	Artist   string `json:"artist,omitempty"`
+	ArtistID string `json:"artist_id,omitempty"`
+	Album    string `json:"album,omitempty"`
+}
+
+// historyRowJSON is one event in `spot history --json`.
+type historyRowJSON struct {
+	ID         int64             `json:"id"`
+	Kind       string            `json:"kind"`
+	Zone       string            `json:"zone,omitempty"`
+	Source     string            `json:"source,omitempty"`
+	OccurredAt string            `json:"occurred_at"`
+	Track      *historyTrackJSON `json:"track,omitempty"`
+}
+
+func newFeedbackCmd() *cobra.Command {
+	var current bool
+	var zone, note string
+	cmd := &cobra.Command{
+		Use:   "feedback <love|hate|skip-forever> [query]",
+		Short: "Record a verdict on a track for the local-memory layer",
+		Long: `Record a feedback event ("love", "hate", or "skip-forever") on a track.
+Either pass a free-text query / Spotify URI, or use --current with a zone to
+target whatever's currently playing on that zone.
+
+The event is written to the local SQLite memory and the resolved track is
+also cached so future "spot history" rows can show its title and artist.`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			verdict := args[0]
+			var query string
+			if len(args) == 2 {
+				query = args[1]
+			}
+			if !current && query == "" {
+				return fmt.Errorf("either pass a query or --current <zone>")
+			}
+			if current && zone == "" {
+				return fmt.Errorf("--current requires --zone <name>")
+			}
+			info, err := spot.Feedback(cmd.Context(), query, zone, verdict, note)
+			if err != nil {
+				return err
+			}
+			out := feedbackJSON{Action: "feedback", Verdict: verdict, TrackID: info.TrackID}
+			return emit(out, func() error {
+				label := info.Title
+				if info.Artist != "" {
+					label = info.Artist + " — " + info.Title
+				}
+				fmt.Printf("%s recorded for %s (%s)\n", verdict, label, info.TrackID)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().BoolVar(&current, "current", false, "feedback applies to the zone's currently-playing track")
+	cmd.Flags().StringVar(&zone, "zone", "", "Sonos zone name (required with --current)")
+	cmd.Flags().StringVar(&note, "note", "", "optional free-text note attached to the feedback event")
+	return cmd
+}
+
+func newMarkCmd() *cobra.Command {
+	var zone string
+	cmd := &cobra.Command{
+		Use:   "mark <note>",
+		Short: "Annotate the currently-playing track with a free-text note",
+		Long: `Record a "note" event for whatever is currently playing on a zone. With
+no --zone, mark picks the first zone in the household whose state is
+PLAYING; if none are playing, mark errors out and asks for an explicit zone.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			note := args[0]
+			info, err := spot.Mark(cmd.Context(), zone, note)
+			if err != nil {
+				return err
+			}
+			out := markJSON{Action: "mark", Note: note, Zone: zone, TrackID: info.TrackID}
+			return emit(out, func() error {
+				label := info.Title
+				if info.Artist != "" {
+					label = info.Artist + " — " + info.Title
+				}
+				fmt.Printf("noted on %s (%s): %s\n", label, info.TrackID, note)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&zone, "zone", "", "Sonos zone (default: first zone reporting PLAYING)")
+	return cmd
+}
+
+func newHistoryCmd() *cobra.Command {
+	var (
+		zone, artist, kind, since string
+		limit                     int
+	)
+	cmd := &cobra.Command{
+		Use:   "history",
+		Short: "Show recent events from the local-memory layer",
+		Long: `Print rows from the events table joined to the cached track metadata.
+
+Filters:
+  --zone NAME       only events from this zone
+  --artist X        substring match against cached artist name, or
+                    "spotify:artist:<id>" for an exact id match
+  --kind X          only events of this kind (observe, play, feedback, note, ...)
+  --since DURATION  Go duration relative to now (default 24h)
+  --limit N         max rows (default 50)
+
+Newest first.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			f := spot.HistoryFilter{Zone: zone, Artist: artist, Kind: kind, Limit: limit}
+			if since != "" {
+				d, err := time.ParseDuration(since)
+				if err != nil {
+					return fmt.Errorf("--since: %w", err)
+				}
+				f.Since = d
+			}
+			rows, err := spot.History(cmd.Context(), f)
+			if err != nil {
+				return err
+			}
+			out := make([]historyRowJSON, 0, len(rows))
+			for _, r := range rows {
+				row := historyRowJSON{
+					ID:         r.ID,
+					Kind:       r.Kind,
+					Zone:       r.Zone,
+					Source:     r.Source,
+					OccurredAt: r.OccurredAt.UTC().Format(time.RFC3339),
+				}
+				if r.Track != nil {
+					row.Track = &historyTrackJSON{
+						TrackID:  r.Track.TrackID,
+						Title:    r.Track.Title,
+						Artist:   r.Track.Artist,
+						ArtistID: r.Track.ArtistID,
+						Album:    r.Track.Album,
+					}
+				}
+				out = append(out, row)
+			}
+			return emit(out, func() error {
+				if len(rows) == 0 {
+					fmt.Fprintln(os.Stderr, "no events match")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "WHEN\tKIND\tZONE\tTRACK")
+				for _, r := range rows {
+					ts := r.OccurredAt.Local().Format("2006-01-02 15:04")
+					label := ""
+					if r.Track != nil {
+						if r.Track.Artist != "" && r.Track.Title != "" {
+							label = r.Track.Artist + " — " + r.Track.Title
+						} else if r.Track.Title != "" {
+							label = r.Track.Title
+						} else {
+							label = r.Track.TrackID
+						}
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", ts, r.Kind, r.Zone, label)
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	cmd.Flags().StringVar(&zone, "zone", "", "filter by Sonos zone name")
+	cmd.Flags().StringVar(&artist, "artist", "", "filter by artist (substring or spotify:artist:<id>)")
+	cmd.Flags().StringVar(&kind, "kind", "", "filter by event kind")
+	cmd.Flags().StringVar(&since, "since", "24h", "Go duration window relative to now")
+	cmd.Flags().IntVar(&limit, "limit", 50, "max rows to return")
+	return cmd
+}
+
+func newStatsCmd() *cobra.Command {
+	var (
+		topN    int
+		recent  bool
+		skipped bool
+	)
+	cmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Show aggregations from the local-memory layer",
+		Long: `Print play / skip aggregations sourced from the events table.
+
+Modes (mutually exclusive — default is --top 10):
+  --top N    most-played tracks and artists from kind='play_started' (all time)
+  --recent   same as --top but limited to the last 7 days
+  --skipped  tracks with the most kind='skip' events in the last 7 days`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			modes := 0
+			if cmd.Flags().Changed("top") {
+				modes++
+			}
+			if recent {
+				modes++
+			}
+			if skipped {
+				modes++
+			}
+			if modes > 1 {
+				return fmt.Errorf("--top, --recent, --skipped are mutually exclusive")
+			}
+			mode := "top"
+			n := topN
+			switch {
+			case recent:
+				mode = "recent"
+			case skipped:
+				mode = "skipped"
+			}
+			s, err := spot.ComputeStats(cmd.Context(), mode, n)
+			if err != nil {
+				return err
+			}
+			return emit(s, func() error {
+				switch mode {
+				case "skipped":
+					if len(s.Skipped) == 0 {
+						fmt.Println("no skip events in the last 7 days")
+						return nil
+					}
+					tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+					fmt.Fprintln(tw, "COUNT\tTRACK")
+					for _, t := range s.Skipped {
+						label := t.TrackID
+						if t.Artist != "" && t.Title != "" {
+							label = t.Artist + " — " + t.Title
+						}
+						fmt.Fprintf(tw, "%d\t%s\n", t.Count, label)
+					}
+					return tw.Flush()
+				default:
+					if len(s.TopTracks) == 0 && len(s.TopArtists) == 0 {
+						fmt.Println("no play_started events recorded yet")
+						return nil
+					}
+					tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+					fmt.Fprintln(tw, "TOP TRACKS\t\tTOP ARTISTS")
+					rows := len(s.TopTracks)
+					if len(s.TopArtists) > rows {
+						rows = len(s.TopArtists)
+					}
+					for i := 0; i < rows; i++ {
+						left := ""
+						if i < len(s.TopTracks) {
+							t := s.TopTracks[i]
+							label := t.TrackID
+							if t.Artist != "" && t.Title != "" {
+								label = t.Artist + " — " + t.Title
+							}
+							left = fmt.Sprintf("%d  %s", t.Count, label)
+						}
+						right := ""
+						if i < len(s.TopArtists) {
+							a := s.TopArtists[i]
+							name := a.Name
+							if name == "" {
+								name = a.ArtistID
+							}
+							right = fmt.Sprintf("%d  %s", a.Count, name)
+						}
+						fmt.Fprintf(tw, "%s\t\t%s\n", left, right)
+					}
+					return tw.Flush()
+				}
+			})
+		},
+	}
+	cmd.Flags().IntVar(&topN, "top", 10, "limit for top-N aggregations")
+	cmd.Flags().BoolVar(&recent, "recent", false, "restrict --top window to the last 7 days")
+	cmd.Flags().BoolVar(&skipped, "skipped", false, "show most-skipped tracks in the last 7 days")
+	return cmd
 }

@@ -3,6 +3,8 @@ package spot
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -448,7 +450,60 @@ func NowPlaying(ctx context.Context, room string) (*Playback, error) {
 			}
 		}
 	}
+
+	// Best-effort observe event for the local-memory layer. Never fails
+	// the read.
+	writeObserveEvent(ctx, p, "now")
 	return p, nil
+}
+
+// writeObserveEvent records a kind="observe" event when the zone is
+// playing a Spotify track. Errors are swallowed — observation must never
+// fail the caller's primary read.
+func writeObserveEvent(ctx context.Context, p *Playback, source string) {
+	if p == nil || p.State != "PLAYING" {
+		return
+	}
+	id := extractSpotifyTrackID(p.URI)
+	if id == "" {
+		return
+	}
+	payload := map[string]any{
+		"position_ms": parseSonosTimeMS(p.Position),
+		"track_id":    id,
+		"state":       p.State,
+	}
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	_ = InsertEvent(ctx, EventRow{
+		Kind:       "observe",
+		TrackID:    sql.NullString{String: id, Valid: true},
+		Zone:       sql.NullString{String: p.Zone, Valid: p.Zone != ""},
+		Source:     sql.NullString{String: source, Valid: true},
+		Payload:    sql.NullString{String: string(buf), Valid: true},
+		OccurredAt: time.Now().Unix(),
+	})
+}
+
+// parseSonosTimeMS converts a Sonos hh:mm:ss timestamp to milliseconds.
+// Returns 0 on parse failure or empty input.
+func parseSonosTimeMS(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) != 3 {
+		return 0
+	}
+	h, err1 := strconv.Atoi(parts[0])
+	m, err2 := strconv.Atoi(parts[1])
+	sec, err3 := strconv.Atoi(parts[2])
+	if err1 != nil || err2 != nil || err3 != nil {
+		return 0
+	}
+	return int64(h*3600+m*60+sec) * 1000
 }
 
 // SpotifyOnSonosInfo returns the Spotify service registration as Sonos sees
@@ -662,6 +717,16 @@ func ShowQueue(ctx context.Context, room string) (*QueueListing, error) {
 	if mi, err := getMediaInfo(ctx, ip); err == nil && strings.HasPrefix(mi.CurrentURI, "x-rincon-queue:") {
 		if pi, err := getPositionInfo(ctx, ip); err == nil {
 			pos = pi.Track
+			// Best-effort observe event — only if the zone is playing.
+			if state, err := getTransportInfo(ctx, ip); err == nil {
+				writeObserveEvent(ctx, &Playback{
+					Zone:     name,
+					State:    state,
+					URI:      pi.URI,
+					Position: pi.Position,
+					Duration: pi.Duration,
+				}, "queue")
+			}
 		}
 	}
 	return &QueueListing{Zone: name, Position: pos, Tracks: tracks}, nil

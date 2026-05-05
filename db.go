@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -37,7 +38,21 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_track_time ON events(track_id, occurred_at);
 CREATE INDEX IF NOT EXISTS events_kind_time  ON events(kind, occurred_at);
+
+CREATE TABLE IF NOT EXISTS tracks (
+  id           TEXT PRIMARY KEY,
+  title        TEXT,
+  artist_id    TEXT,
+  artist_name  TEXT,
+  album        TEXT,
+  popularity   INTEGER,
+  fetched_at   INTEGER NOT NULL
+);
 `
+
+// trackCacheTTL controls how long a cached row in `tracks` is considered
+// fresh before LookupTrack falls through to a Spotify refetch.
+const trackCacheTTL = 30 * 24 * time.Hour
 
 var (
 	dbOnce sync.Once
@@ -99,4 +114,83 @@ func InsertEvent(ctx context.Context, e EventRow) error {
 		return fmt.Errorf("insert event: %w", err)
 	}
 	return nil
+}
+
+// CacheTrack upserts a row in the local tracks cache. Popularity is the
+// Spotify popularity score (0-100) at fetch time; pass -1 (or any negative
+// value) when the caller doesn't have it.
+func CacheTrack(ctx context.Context, t *trackInfo, popularity int) error {
+	if t == nil || t.TrackID == "" {
+		return nil
+	}
+	db, err := getDB(ctx)
+	if err != nil {
+		return err
+	}
+	var pop sql.NullInt64
+	if popularity >= 0 {
+		pop = sql.NullInt64{Int64: int64(popularity), Valid: true}
+	}
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO tracks (id, title, artist_id, artist_name, album, popularity, fetched_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   title       = excluded.title,
+		   artist_id   = excluded.artist_id,
+		   artist_name = excluded.artist_name,
+		   album       = excluded.album,
+		   popularity  = excluded.popularity,
+		   fetched_at  = excluded.fetched_at`,
+		t.TrackID, t.Title, t.ArtistID, t.Artist, t.Album, pop, time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("cache track %s: %w", t.TrackID, err)
+	}
+	return nil
+}
+
+// LookupTrack returns the cached metadata for a Spotify track ID. Returns
+// (nil, nil) when the ID isn't cached. If the cache row is older than
+// trackCacheTTL, LookupTrack refetches from Spotify and refreshes the row
+// before returning. A refetch failure on a stale row is logged via the
+// error path; callers are expected to fall back to resolveTrack themselves.
+func LookupTrack(ctx context.Context, id string) (*trackInfo, error) {
+	if id == "" {
+		return nil, nil
+	}
+	db, err := getDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		title, artistID, artistName, album sql.NullString
+		fetchedAt                          int64
+	)
+	err = db.QueryRowContext(ctx,
+		`SELECT title, artist_id, artist_name, album, fetched_at
+		   FROM tracks WHERE id = ?`,
+		id,
+	).Scan(&title, &artistID, &artistName, &album, &fetchedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup track %s: %w", id, err)
+	}
+
+	if time.Since(time.Unix(fetchedAt, 0)) > trackCacheTTL {
+		// Stale: refresh via Spotify. Best-effort — if the refetch
+		// fails (offline, auth missing, etc.) return the stale row.
+		if fresh, err := resolveTrack(ctx, "spotify:track:"+id); err == nil && fresh != nil {
+			_ = CacheTrack(ctx, fresh, -1)
+			return fresh, nil
+		}
+	}
+	return &trackInfo{
+		TrackID:  id,
+		Title:    title.String,
+		ArtistID: artistID.String,
+		Artist:   artistName.String,
+		Album:    album.String,
+	}, nil
 }
