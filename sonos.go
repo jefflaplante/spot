@@ -1,4 +1,4 @@
-package spotify
+package spot
 
 import (
 	"bytes"

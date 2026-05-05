@@ -21,7 +21,7 @@ import (
 	"syscall"
 	"text/tabwriter"
 
-	"github.com/jefflaplante/spotify"
+	"github.com/jefflaplante/spot"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +49,7 @@ func main() {
 		Short: "Run the one-time OAuth bootstrap and write the token cache",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return spotify.Authenticate(cmd.Context())
+			return spot.Authenticate(cmd.Context())
 		},
 	})
 
@@ -65,7 +65,7 @@ app), tap the Connect/devices icon, pick the zone, and play any track. The
 zone will then register as a Spotify Connect device and appear here.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			devs, err := spotify.Devices(cmd.Context())
+			devs, err := spot.Devices(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -94,7 +94,7 @@ Set SONOS_HOST=<ip> to skip SSDP discovery if multicast is blocked on your
 network (common in some VM/container setups).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			zones, err := spotify.ListSonosZones(cmd.Context())
+			zones, err := spot.ListSonosZones(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -116,7 +116,7 @@ network (common in some VM/container setups).`,
 		Short: "Pause playback on a Sonos zone",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return spotify.Pause(cmd.Context(), args[0])
+			return spot.Pause(cmd.Context(), args[0])
 		},
 	})
 
@@ -125,7 +125,7 @@ network (common in some VM/container setups).`,
 		Short: "Resume playback on a Sonos zone (continues from current position)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return spotify.Resume(cmd.Context(), args[0])
+			return spot.Resume(cmd.Context(), args[0])
 		},
 	})
 
@@ -139,7 +139,7 @@ the queue, start it with "spot play -v sonos -c <something> <zone>" first
 (or use the Sonos app), then enqueue subsequent tracks.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res, err := spotify.EnqueueViaSonos(cmd.Context(), args[0], args[1])
+			res, err := spot.EnqueueViaSonos(cmd.Context(), args[0], args[1])
 			if err != nil {
 				return err
 			}
@@ -156,14 +156,14 @@ the queue, start it with "spot play -v sonos -c <something> <zone>" first
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if queueRaw {
-				xmlStr, err := spotify.BrowseQueueRaw(cmd.Context(), args[0])
+				xmlStr, err := spot.BrowseQueueRaw(cmd.Context(), args[0])
 				if err != nil {
 					return err
 				}
 				fmt.Println(xmlStr)
 				return nil
 			}
-			q, err := spotify.ShowQueue(cmd.Context(), args[0])
+			q, err := spot.ShowQueue(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -203,7 +203,7 @@ the queue, start it with "spot play -v sonos -c <something> <zone>" first
 		Short:   "Skip to the next track in the zone's queue",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return spotify.Next(cmd.Context(), args[0])
+			return spot.Next(cmd.Context(), args[0])
 		},
 	})
 
@@ -212,7 +212,7 @@ the queue, start it with "spot play -v sonos -c <something> <zone>" first
 		Short: "Stop playback on a Sonos zone (resets position to start)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return spotify.Stop(cmd.Context(), args[0])
+			return spot.Stop(cmd.Context(), args[0])
 		},
 	})
 
@@ -233,7 +233,7 @@ After any change, the new volume is printed (clamped to 0-100).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			zone := args[0]
 			if len(args) == 1 {
-				v, err := spotify.Volume(cmd.Context(), zone)
+				v, err := spot.Volume(cmd.Context(), zone)
 				if err != nil {
 					return err
 				}
@@ -251,7 +251,7 @@ After any change, the new volume is printed (clamped to 0-100).`,
 			var target int
 			switch args[1] {
 			case "up", "down":
-				cur, err := spotify.Volume(cmd.Context(), zone)
+				cur, err := spot.Volume(cmd.Context(), zone)
 				if err != nil {
 					return err
 				}
@@ -276,7 +276,7 @@ After any change, the new volume is printed (clamped to 0-100).`,
 			if target > 100 {
 				target = 100
 			}
-			if err := spotify.SetVolume(cmd.Context(), zone, target); err != nil {
+			if err := spot.SetVolume(cmd.Context(), zone, target); err != nil {
 				return err
 			}
 			fmt.Println(target)
@@ -293,7 +293,7 @@ GetPositionInfo over UPnP/SOAP — works regardless of whether playback was
 started via spot, the Sonos app, Spotify Connect, or anything else.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := spotify.NowPlaying(cmd.Context(), args[0])
+			p, err := spot.NowPlaying(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -335,7 +335,7 @@ what URI and metadata Sonos used. Useful for debugging UPnP error 800 from
 match what Sonos expects for your specific Spotify SMAPI integration.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			info, err := spotify.CurrentTrackFor(cmd.Context(), args[0])
+			info, err := spot.CurrentTrackFor(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -356,7 +356,7 @@ sid (service ID), type (DIDL token number), and sn (account index) that
 spot will use when playing on this zone.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			info, err := spotify.SpotifyServiceFor(cmd.Context(), args[0])
+			info, err := spot.SpotifyServiceFor(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -394,15 +394,15 @@ Continuation (-c / --continue):
   mode they're added to the speaker's queue and the queue is played.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var opts []spotify.PlayOption
+			var opts []spot.PlayOption
 			if continuePlay {
-				opts = append(opts, spotify.WithContinue())
+				opts = append(opts, spot.WithContinue())
 			}
 			switch via {
 			case "", "connect":
-				return spotify.Play(cmd.Context(), args[0], args[1], opts...)
+				return spot.Play(cmd.Context(), args[0], args[1], opts...)
 			case "sonos":
-				return spotify.PlayViaSonos(cmd.Context(), args[0], args[1], opts...)
+				return spot.PlayViaSonos(cmd.Context(), args[0], args[1], opts...)
 			default:
 				return fmt.Errorf("unknown --via=%q (expected 'connect' or 'sonos')", via)
 			}

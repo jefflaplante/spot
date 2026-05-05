@@ -6,8 +6,8 @@ harness running on a headless Linux VM.
 
 Three ways to use it:
 
-- **Library** — `import "github.com/jefflaplante/spotify"` and call
-  `spotify.Play(ctx, query, room)` from Go code.
+- **Library** — `import "github.com/jefflaplante/spot"` and call
+  `spot.Play(ctx, query, room)` from Go code.
 - **CLI** — `spot play "bonobo migration" "Living Room"` from a shell or
   subprocess.
 - **Claude Code skill** — natural-language control from inside Claude
@@ -42,8 +42,8 @@ just tells Spotify which device to play on.
 ### 2. Build and install
 
 ```bash
-git clone https://github.com/jefflaplante/spotify.git
-cd spotify
+git clone https://github.com/jefflaplante/spot.git
+cd spot
 make install        # or: make build  →  ./spot
 ```
 
@@ -300,7 +300,8 @@ parsed as a flag.
 ```go
 import (
     "context"
-    spot "github.com/jefflaplante/spotify"
+
+    "github.com/jefflaplante/spot"
 )
 
 func playSomething(ctx context.Context) error {

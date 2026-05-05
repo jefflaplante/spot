@@ -4,12 +4,12 @@
 // One-time setup, on a machine with a browser (or via SSH port-forward
 // `ssh -L 8888:127.0.0.1:8888 user@vm`):
 //
-//	spotify.Authenticate(ctx)
+//	spot.Authenticate(ctx)
 //
 // Then from the harness, as many times as you like:
 //
-//	spotify.Play(ctx, "bonobo migration", "Living Room")
-//	spotify.Play(ctx, "spotify:track:4cOdK2wGLETKBW3PvgPWqT", "Kitchen")
+//	spot.Play(ctx, "bonobo migration", "Living Room")
+//	spot.Play(ctx, "spotify:track:4cOdK2wGLETKBW3PvgPWqT", "Kitchen")
 //
 // Env vars:
 //
@@ -17,7 +17,7 @@
 //	SPOTIFY_SECRET        (required)
 //	SPOTIFY_REDIRECT_URI  (default http://127.0.0.1:8888/callback)
 //	SPOTIFY_TOKEN_PATH    (default ./.spotify-cache)
-package spotify
+package spot
 
 import (
 	"context"
@@ -205,7 +205,7 @@ func Devices(ctx context.Context) ([]sp.PlayerDevice, error) {
 }
 
 // PlayOption configures Play / PlayViaSonos behavior. Pass options after the
-// required positional args, e.g. spotify.Play(ctx, "x", "y", spotify.WithContinue()).
+// required positional args, e.g. spot.Play(ctx, "x", "y", spot.WithContinue()).
 type PlayOption func(*playOpts)
 
 type playOpts struct {

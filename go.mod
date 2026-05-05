@@ -1,4 +1,4 @@
-module github.com/jefflaplante/spotify
+module github.com/jefflaplante/spot
 
 go 1.25.0
 
