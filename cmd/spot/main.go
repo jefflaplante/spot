@@ -179,6 +179,30 @@ type freshAlbumJSON struct {
 	TrackIDs    []string `json:"track_ids"`
 }
 
+// --- mix command JSON shapes -------------------------------------------
+// (bd-bqx) Self-contained block: shape used by `spot mix`. Kept near the
+// other discovery shapes to make merges with parallel discovery work
+// (daily/deeper/rabbithole) easy to land alongside.
+
+// mixTrackJSON is the JSON shape for one row in `spot mix --json`.
+type mixTrackJSON struct {
+	Position int    `json:"position"`
+	TrackID  string `json:"track_id"`
+	Title    string `json:"title,omitempty"`
+	Artist   string `json:"artist,omitempty"`
+	Album    string `json:"album,omitempty"`
+}
+
+// mixResultJSON is the top-level JSON object for `spot mix`.
+type mixResultJSON struct {
+	Length int            `json:"length"`
+	Seed   string         `json:"seed,omitempty"`
+	Zone   string         `json:"zone,omitempty"`
+	Tracks []mixTrackJSON `json:"tracks"`
+}
+
+// --- end mix command JSON shapes ---------------------------------------
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -1006,6 +1030,98 @@ every track on each fresh album.`,
 	freshCmd.Flags().StringVar(&freshZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
 	freshCmd.Flags().BoolVar(&freshAll, "all-tracks", false, "include all tracks per album (default: first track only)")
 	root.AddCommand(freshCmd)
+
+	// --- mix command (bd-bqx) -----------------------------------------
+	// Self-contained block — kept next to freshCmd so merges with
+	// parallel discovery agents (daily/deeper/rabbithole) are easy.
+
+	var (
+		mixLength        int
+		mixSeed          string
+		mixZone          string
+		mixExcludeRecent int
+	)
+	mixCmd := &cobra.Command{
+		Use:   "mix",
+		Short: "Curated mix from your top tracks (or a seed) with feedback/recent filters",
+		Long: `Build a curated track list from your medium_term top tracks (or, with
+--seed, the seed track plus its primary artist's top tracks), filtered
+against the local feedback memory (skip-forever / hate verdicts) and
+recent kind='play_started' history. Truncated to --length.
+
+Pass --zone to queue the resulting mix on a Sonos zone via UPnP after
+emitting it; omit --zone to just print the list.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if mixLength <= 0 {
+				return fmt.Errorf("--length must be positive")
+			}
+			if mixExcludeRecent < 0 {
+				return fmt.Errorf("--exclude-recent must be >= 0")
+			}
+			opts := spot.MixOptions{
+				Length:        mixLength,
+				Seed:          mixSeed,
+				ExcludeRecent: time.Duration(mixExcludeRecent) * 24 * time.Hour,
+			}
+			tracks, err := spot.Mix(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+
+			out := mixResultJSON{
+				Length: len(tracks),
+				Seed:   mixSeed,
+				Zone:   mixZone,
+				Tracks: make([]mixTrackJSON, 0, len(tracks)),
+			}
+			ids := make([]string, 0, len(tracks))
+			for i, t := range tracks {
+				out.Tracks = append(out.Tracks, mixTrackJSON{
+					Position: i + 1,
+					TrackID:  t.TrackID,
+					Title:    t.Title,
+					Artist:   t.Artist,
+					Album:    t.Album,
+				})
+				if t.TrackID != "" {
+					ids = append(ids, t.TrackID)
+				}
+			}
+
+			if mixZone != "" && len(ids) > 0 {
+				if err := spot.PlayTrackIDsViaSonos(cmd.Context(), mixZone, ids); err != nil {
+					return err
+				}
+			}
+
+			return emit(out, func() error {
+				if len(tracks) == 0 {
+					fmt.Fprintln(os.Stderr, "no tracks in mix (try a different seed or shorter --exclude-recent)")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "POS\tARTIST\tTITLE")
+				for i, t := range tracks {
+					fmt.Fprintf(tw, "%d\t%s\t%s\n", i+1, t.Artist, t.Title)
+				}
+				if err := tw.Flush(); err != nil {
+					return err
+				}
+				if mixZone != "" {
+					fmt.Printf("queued %d track(s) on %s\n", len(ids), mixZone)
+				}
+				return nil
+			})
+		},
+	}
+	mixCmd.Flags().IntVar(&mixLength, "length", 20, "number of tracks in the mix")
+	mixCmd.Flags().StringVar(&mixSeed, "seed", "", "anchor mix to this track or artist (URI or query)")
+	mixCmd.Flags().StringVar(&mixZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
+	mixCmd.Flags().IntVar(&mixExcludeRecent, "exclude-recent", 7, "drop tracks played within the last N days (0 disables)")
+	root.AddCommand(mixCmd)
+
+	// --- end mix command ----------------------------------------------
 
 	// --- end personalization commands ---------------------------------
 
