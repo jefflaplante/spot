@@ -128,6 +128,45 @@ type playlistJSON struct {
 	Public bool   `json:"public"`
 }
 
+// --- library-mutation JSON shapes (like/unlike, follow/unfollow, playlist) ---
+
+// libTrackJSON is the JSON shape used by `like` / `unlike` and as a nested
+// field in `playlist add` / `playlist remove`.
+type libTrackJSON struct {
+	Action  string `json:"action,omitempty"`
+	TrackID string `json:"track_id"`
+	Title   string `json:"title"`
+	Artist  string `json:"artist"`
+}
+
+// followJSON is the JSON shape used by `follow` / `unfollow`.
+type followJSON struct {
+	Action   string `json:"action"`
+	ArtistID string `json:"artist_id"`
+	Name     string `json:"name"`
+}
+
+// playlistNewJSON is the JSON shape used by `playlist new`.
+type playlistNewJSON struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Public bool   `json:"public"`
+	URI    string `json:"uri"`
+}
+
+// playlistTrackJSON is a nested track summary inside playlistMutateJSON.
+type playlistTrackJSON struct {
+	TrackID string `json:"track_id"`
+	Title   string `json:"title"`
+	Artist  string `json:"artist"`
+}
+
+// playlistMutateJSON is the JSON shape used by `playlist add` / `playlist remove`.
+type playlistMutateJSON struct {
+	Action   string            `json:"action"`
+	Playlist string            `json:"playlist"`
+	Track    playlistTrackJSON `json:"track"`
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -922,6 +961,207 @@ Continuation (-c / --continue):
 	root.AddCommand(newMarkCmd())
 	root.AddCommand(newHistoryCmd())
 	root.AddCommand(newStatsCmd())
+
+	// resolveLibraryQuery picks between an explicit query arg and --current
+	// <zone> mode. With --current, NowPlaying drives the URI.
+	resolveLibraryQuery := func(cmd *cobra.Command, args []string, currentZone string) (string, error) {
+		if currentZone != "" {
+			if len(args) > 0 {
+				return "", fmt.Errorf("pass either <query> or --current <zone>, not both")
+			}
+			p, err := spot.NowPlaying(cmd.Context(), currentZone)
+			if err != nil {
+				return "", err
+			}
+			if p.URI == "" {
+				return "", fmt.Errorf("nothing playing on %q", currentZone)
+			}
+			return p.URI, nil
+		}
+		if len(args) != 1 {
+			return "", fmt.Errorf("requires <query> or --current <zone>")
+		}
+		return args[0], nil
+	}
+
+	var likeCurrent string
+	likeCmd := &cobra.Command{
+		Use:   "like [<query>|--current <zone>]",
+		Short: "Save a track to your Liked Songs library",
+		Long: `Resolve <query> (free-text or "spotify:track:..." URI) to a single
+track and add it to your Liked Songs (PUT /v1/me/tracks).
+
+With --current <zone>, the currently playing track on the named Sonos zone
+is liked instead — handy for "like what I'm hearing right now".`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q, err := resolveLibraryQuery(cmd, args, likeCurrent)
+			if err != nil {
+				return err
+			}
+			info, err := spot.Like(cmd.Context(), q)
+			if err != nil {
+				return err
+			}
+			return emit(libTrackJSON{
+				Action: "like", TrackID: info.TrackID, Title: info.Title, Artist: info.Artist,
+			}, func() error {
+				fmt.Printf("liked: %s — %s\n", info.Artist, info.Title)
+				return nil
+			})
+		},
+	}
+	likeCmd.Flags().StringVar(&likeCurrent, "current", "", "like the track currently playing on the named Sonos zone")
+	root.AddCommand(likeCmd)
+
+	var unlikeCurrent string
+	unlikeCmd := &cobra.Command{
+		Use:   "unlike [<query>|--current <zone>]",
+		Short: "Remove a track from your Liked Songs library",
+		Long: `Resolve <query> (free-text or "spotify:track:..." URI) to a single
+track and remove it from your Liked Songs (DELETE /v1/me/tracks).
+
+With --current <zone>, the currently playing track on the named Sonos zone
+is unliked instead.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q, err := resolveLibraryQuery(cmd, args, unlikeCurrent)
+			if err != nil {
+				return err
+			}
+			info, err := spot.Unlike(cmd.Context(), q)
+			if err != nil {
+				return err
+			}
+			return emit(libTrackJSON{
+				Action: "unlike", TrackID: info.TrackID, Title: info.Title, Artist: info.Artist,
+			}, func() error {
+				fmt.Printf("unliked: %s — %s\n", info.Artist, info.Title)
+				return nil
+			})
+		},
+	}
+	unlikeCmd.Flags().StringVar(&unlikeCurrent, "current", "", "unlike the track currently playing on the named Sonos zone")
+	root.AddCommand(unlikeCmd)
+
+	root.AddCommand(&cobra.Command{
+		Use:   "follow <artist>",
+		Short: "Follow an artist",
+		Long: `Resolve <artist> (free-text query or "spotify:artist:..." URI) to a
+single artist via Search and follow them
+(PUT /v1/me/following?type=artist).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, name, err := spot.Follow(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			return emit(followJSON{Action: "follow", ArtistID: id, Name: name}, func() error {
+				fmt.Printf("following: %s\n", name)
+				return nil
+			})
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "unfollow <artist>",
+		Short: "Unfollow an artist",
+		Long: `Resolve <artist> (free-text query or "spotify:artist:..." URI) to a
+single artist via Search and unfollow them
+(DELETE /v1/me/following?type=artist).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, name, err := spot.Unfollow(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			return emit(followJSON{Action: "unfollow", ArtistID: id, Name: name}, func() error {
+				fmt.Printf("unfollowed: %s\n", name)
+				return nil
+			})
+		},
+	})
+
+	playlistCmd := &cobra.Command{
+		Use:   "playlist",
+		Short: "Manage your Spotify playlists (new, add, remove)",
+	}
+
+	var playlistNewDescription string
+	var playlistNewPublic bool
+	playlistNewCmd := &cobra.Command{
+		Use:   "new <name>",
+		Short: "Create a new playlist owned by the current user",
+		Long: `Create a new playlist owned by the authenticated user
+(POST /v1/users/{me.id}/playlists). Playlists are private by default;
+pass --public to create a public playlist instead.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pl, err := spot.CreatePlaylist(cmd.Context(), args[0], playlistNewDescription, playlistNewPublic)
+			if err != nil {
+				return err
+			}
+			return emit(playlistNewJSON{
+				ID: string(pl.ID), Name: pl.Name, Public: pl.IsPublic, URI: string(pl.URI),
+			}, func() error {
+				fmt.Printf("created playlist: %s\n  id:  %s\n  uri: %s\n", pl.Name, pl.ID, pl.URI)
+				return nil
+			})
+		},
+	}
+	playlistNewCmd.Flags().StringVar(&playlistNewDescription, "description", "", "playlist description")
+	playlistNewCmd.Flags().BoolVar(&playlistNewPublic, "public", false, "make the playlist public (default: private)")
+	playlistCmd.AddCommand(playlistNewCmd)
+
+	playlistCmd.AddCommand(&cobra.Command{
+		Use:   "add <playlist> <query>",
+		Short: "Add a track to one of your playlists",
+		Long: `Match <playlist> by case-insensitive substring against your playlists
+(MyPlaylists), resolve <query> to a track, and add it
+(POST /v1/playlists/{id}/tracks). Errors if zero or more than one playlist
+match.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			info, pl, err := spot.AddToPlaylist(cmd.Context(), args[0], args[1])
+			if err != nil {
+				return err
+			}
+			return emit(playlistMutateJSON{
+				Action:   "playlist-add",
+				Playlist: pl.Name,
+				Track:    playlistTrackJSON{TrackID: info.TrackID, Title: info.Title, Artist: info.Artist},
+			}, func() error {
+				fmt.Printf("added to %s: %s — %s\n", pl.Name, info.Artist, info.Title)
+				return nil
+			})
+		},
+	})
+
+	playlistCmd.AddCommand(&cobra.Command{
+		Use:   "remove <playlist> <query>",
+		Short: "Remove a track from one of your playlists",
+		Long: `Match <playlist> by case-insensitive substring against your playlists
+(MyPlaylists), resolve <query> to a track, and remove it
+(DELETE /v1/playlists/{id}/tracks). Errors if zero or more than one playlist
+match.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			info, pl, err := spot.RemoveFromPlaylist(cmd.Context(), args[0], args[1])
+			if err != nil {
+				return err
+			}
+			return emit(playlistMutateJSON{
+				Action:   "playlist-remove",
+				Playlist: pl.Name,
+				Track:    playlistTrackJSON{TrackID: info.TrackID, Title: info.Title, Artist: info.Artist},
+			}, func() error {
+				fmt.Printf("removed from %s: %s — %s\n", pl.Name, info.Artist, info.Title)
+				return nil
+			})
+		},
+	})
+
+	root.AddCommand(playlistCmd)
 
 	if err := root.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
