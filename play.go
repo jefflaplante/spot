@@ -46,6 +46,25 @@ var (
 	cachedErr    error
 )
 
+// spotifyScopes is the single source of truth for OAuth scopes requested
+// by both newAuthenticator (bootstrap) and newOAuth2Config (refresh). If
+// the two diverge, token refresh silently downgrades scopes — keep them
+// reading from this slice.
+var spotifyScopes = []string{
+	// Playback (existing).
+	spotifyauth.ScopeUserReadPlaybackState,
+	spotifyauth.ScopeUserModifyPlaybackState,
+	// Phase 1: read-only history/library.
+	spotifyauth.ScopeUserTopRead,
+	spotifyauth.ScopeUserReadRecentlyPlayed,
+	spotifyauth.ScopeUserLibraryRead,
+	// Phase 2: library/follow/playlist mutation.
+	spotifyauth.ScopeUserLibraryModify,
+	spotifyauth.ScopeUserFollowModify,
+	spotifyauth.ScopePlaylistModifyPrivate,
+	spotifyauth.ScopePlaylistModifyPublic,
+}
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -56,10 +75,7 @@ func env(key, def string) string {
 func newAuthenticator() *spotifyauth.Authenticator {
 	return spotifyauth.New(
 		spotifyauth.WithRedirectURL(env("SPOTIFY_REDIRECT_URI", defaultRedirectURI)),
-		spotifyauth.WithScopes(
-			spotifyauth.ScopeUserReadPlaybackState,
-			spotifyauth.ScopeUserModifyPlaybackState,
-		),
+		spotifyauth.WithScopes(spotifyScopes...),
 	)
 }
 
@@ -68,10 +84,7 @@ func newOAuth2Config() *oauth2.Config {
 		ClientID:     os.Getenv("SPOTIFY_ID"),
 		ClientSecret: os.Getenv("SPOTIFY_SECRET"),
 		RedirectURL:  env("SPOTIFY_REDIRECT_URI", defaultRedirectURI),
-		Scopes: []string{
-			spotifyauth.ScopeUserReadPlaybackState,
-			spotifyauth.ScopeUserModifyPlaybackState,
-		},
+		Scopes:       append([]string(nil), spotifyScopes...),
 		Endpoint: oauth2.Endpoint{
 			AuthURL:  spotifyauth.AuthURL,
 			TokenURL: spotifyauth.TokenURL,
