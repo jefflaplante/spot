@@ -209,6 +209,18 @@ type dailyTrackJSON struct {
 	Album   string `json:"album,omitempty"`
 }
 
+// deeperTrackJSON is the JSON shape used by `spot deeper`. One row per
+// surfaced track, ordered oldest-album-first — the chronological walk
+// through an artist's discography minus their top-10 hits.
+type deeperTrackJSON struct {
+	AlbumID     string `json:"album_id"`
+	AlbumName   string `json:"album"`
+	ReleaseDate string `json:"release_date"`
+	TrackID     string `json:"track_id"`
+	Title       string `json:"title"`
+	Artist      string `json:"artist"`
+}
+
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -1196,6 +1208,71 @@ omit to just print (or emit JSON with --json).`,
 	dailyCmd.Flags().StringVar(&dailyZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
 	dailyCmd.Flags().IntVar(&dailyLength, "length", 20, "max number of tracks to return")
 	root.AddCommand(dailyCmd)
+
+	// --- deeper command (bd-1ky) --------------------------------------
+
+	var deeperZone string
+	var deeperPerAlbum int
+	deeperCmd := &cobra.Command{
+		Use:   "deeper <artist>",
+		Short: "Surface deep cuts: an artist's albums minus their top 10 tracks",
+		Long: `Walk an artist's full-length albums in chronological order (oldest
+first) and pick 1-2 tracks from each — skipping the artist's top-10
+"greatest hits" so you get the deeper material instead. Singles,
+compilations, and appears-on records are filtered out.
+
+<artist> may be a free-text query ("radiohead") or a Spotify artist URI
+("spotify:artist:..."). With --zone, the resulting track list is queued
+on the named Sonos zone via UPnP.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			tracks, err := spot.Deeper(cmd.Context(), args[0], spot.DeeperOptions{PerAlbum: deeperPerAlbum})
+			if err != nil {
+				return err
+			}
+			out := make([]deeperTrackJSON, 0, len(tracks))
+			for _, t := range tracks {
+				out = append(out, deeperTrackJSON{
+					AlbumID:     t.AlbumID,
+					AlbumName:   t.AlbumName,
+					ReleaseDate: t.ReleaseDate.Format("2006-01-02"),
+					TrackID:     t.TrackID,
+					Title:       t.Title,
+					Artist:      t.Artist,
+				})
+			}
+			if deeperZone != "" && len(tracks) > 0 {
+				ids := make([]string, 0, len(tracks))
+				for _, t := range tracks {
+					ids = append(ids, t.TrackID)
+				}
+				if err := spot.PlayTrackIDsViaSonos(cmd.Context(), deeperZone, ids); err != nil {
+					return err
+				}
+			}
+			return emit(out, func() error {
+				if len(out) == 0 {
+					fmt.Fprintln(os.Stderr, "no deeper tracks found")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "RELEASED\tALBUM\tTITLE")
+				for _, t := range out {
+					fmt.Fprintf(tw, "%s\t%s\t%s\n", t.ReleaseDate, t.AlbumName, t.Title)
+				}
+				if err := tw.Flush(); err != nil {
+					return err
+				}
+				if deeperZone != "" {
+					fmt.Printf("queued %d track(s) on %s\n", len(out), deeperZone)
+				}
+				return nil
+			})
+		},
+	}
+	deeperCmd.Flags().StringVar(&deeperZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
+	deeperCmd.Flags().IntVar(&deeperPerAlbum, "per-album", 1, "tracks to surface per album (1 or 2 keeps the queue tight)")
+	root.AddCommand(deeperCmd)
 
 	// --- end personalization commands ---------------------------------
 
