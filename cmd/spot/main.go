@@ -221,6 +221,33 @@ type deeperTrackJSON struct {
 	Artist      string `json:"artist"`
 }
 
+// rabbitholeTrackJSON is one chosen track in `spot rabbithole --json`.
+type rabbitholeTrackJSON struct {
+	TrackID string `json:"track_id"`
+	Title   string `json:"title"`
+	Artist  string `json:"artist"`
+	Album   string `json:"album,omitempty"`
+}
+
+// rabbitholeStepJSON mirrors spot.RabbitholeStep for the CLI's JSON shape;
+// kept as its own type so we control the field ordering and tags.
+type rabbitholeStepJSON struct {
+	ArtistID     string   `json:"artist_id"`
+	ArtistName   string   `json:"artist_name"`
+	GenreOverlap int      `json:"genre_overlap"`
+	TrackIDs     []string `json:"track_ids"`
+}
+
+// rabbitholeJSON is the envelope `spot rabbithole --json` emits: the
+// chosen tracks plus the artist-by-artist walk that produced them. The
+// walk is included now so a future --explain flag can render the
+// reasoning without re-running the algorithm.
+type rabbitholeJSON struct {
+	Seed   string                `json:"seed,omitempty"`
+	Zone   string                `json:"zone,omitempty"`
+	Tracks []rabbitholeTrackJSON `json:"tracks"`
+	Walk   []rabbitholeStepJSON  `json:"walk"`
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -1273,6 +1300,99 @@ on the named Sonos zone via UPnP.`,
 	deeperCmd.Flags().StringVar(&deeperZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
 	deeperCmd.Flags().IntVar(&deeperPerAlbum, "per-album", 1, "tracks to surface per album (1 or 2 keeps the queue tight)")
 	root.AddCommand(deeperCmd)
+
+	// --- rabbithole command (bd-1aw) ----------------------------------
+
+	var (
+		rabbitSeed   string
+		rabbitLength int
+		rabbitZone   string
+	)
+	rabbitCmd := &cobra.Command{
+		Use:   "rabbithole",
+		Short: "Walk from a seed artist through genre overlap with your top artists",
+		Long: `Substitute for Spotify's deprecated related-artists endpoint. Resolve a
+seed artist (--seed URI/query, or default: your top short-term artist),
+read its genre tags, score your medium- and long-term top artists by how
+many of those genres they share, take the top eight, and pull a couple of
+top tracks from each. Returns roughly --length tracks (default 20).
+
+Pass --zone to queue the result on a Sonos zone instead of just printing.
+
+The JSON output also includes the artist-by-artist walk that produced
+the track list, so a future --explain flag can show why each artist
+was picked.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			tracks, walk, err := spot.Rabbithole(cmd.Context(), spot.RabbitholeOptions{
+				Seed:   rabbitSeed,
+				Length: rabbitLength,
+			})
+			if err != nil {
+				return err
+			}
+
+			if rabbitZone != "" && len(tracks) > 0 {
+				ids := make([]string, 0, len(tracks))
+				for _, t := range tracks {
+					ids = append(ids, t.TrackID)
+				}
+				if err := spot.PlayTrackIDsViaSonos(cmd.Context(), rabbitZone, ids); err != nil {
+					return err
+				}
+			}
+
+			outTracks := make([]rabbitholeTrackJSON, 0, len(tracks))
+			for _, t := range tracks {
+				outTracks = append(outTracks, rabbitholeTrackJSON{
+					TrackID: t.TrackID,
+					Title:   t.Title,
+					Artist:  t.Artist,
+					Album:   t.Album,
+				})
+			}
+			outWalk := make([]rabbitholeStepJSON, 0, len(walk))
+			for _, s := range walk {
+				ids := s.TrackIDs
+				if ids == nil {
+					ids = []string{}
+				}
+				outWalk = append(outWalk, rabbitholeStepJSON{
+					ArtistID:     s.ArtistID,
+					ArtistName:   s.ArtistName,
+					GenreOverlap: s.GenreOverlap,
+					TrackIDs:     ids,
+				})
+			}
+			env := rabbitholeJSON{
+				Seed:   rabbitSeed,
+				Zone:   rabbitZone,
+				Tracks: outTracks,
+				Walk:   outWalk,
+			}
+			return emit(env, func() error {
+				if len(tracks) == 0 {
+					fmt.Fprintln(os.Stderr, "rabbithole: no tracks (try a --seed with at least one genre that overlaps your top artists)")
+					return nil
+				}
+				for _, t := range tracks {
+					if t.Artist != "" {
+						fmt.Printf("%s — %s\n", t.Artist, t.Title)
+					} else {
+						fmt.Println(t.Title)
+					}
+				}
+				if rabbitZone != "" {
+					fmt.Printf("queued %d track(s) on %s\n", len(tracks), rabbitZone)
+				}
+				return nil
+			})
+		},
+	}
+	rabbitCmd.Flags().StringVar(&rabbitSeed, "seed", "", "seed artist (free-text query or spotify:artist:<id>); default: your top short-term artist")
+	rabbitCmd.Flags().IntVar(&rabbitLength, "length", 20, "max number of tracks to return")
+	rabbitCmd.Flags().StringVar(&rabbitZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
+	root.AddCommand(rabbitCmd)
 
 	// --- end personalization commands ---------------------------------
 
