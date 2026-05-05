@@ -24,6 +24,14 @@ func Like(ctx context.Context, query string) (*trackInfo, error) {
 	if err := c.AddTracksToLibrary(ctx, sp.ID(info.TrackID)); err != nil {
 		return nil, fmt.Errorf("like %s: %w", info.TrackID, err)
 	}
+	_ = CacheTrack(ctx, info, -1)
+	logEvent(ctx, EventRow{
+		Kind:     "library",
+		TrackID:  nullable(info.TrackID),
+		ArtistID: nullable(info.ArtistID),
+		Source:   nullable("like"),
+		Payload:  marshalPayload(map[string]any{"action": "like"}),
+	})
 	return info, nil
 }
 
@@ -41,6 +49,14 @@ func Unlike(ctx context.Context, query string) (*trackInfo, error) {
 	if err := c.RemoveTracksFromLibrary(ctx, sp.ID(info.TrackID)); err != nil {
 		return nil, fmt.Errorf("unlike %s: %w", info.TrackID, err)
 	}
+	_ = CacheTrack(ctx, info, -1)
+	logEvent(ctx, EventRow{
+		Kind:     "library",
+		TrackID:  nullable(info.TrackID),
+		ArtistID: nullable(info.ArtistID),
+		Source:   nullable("unlike"),
+		Payload:  marshalPayload(map[string]any{"action": "unlike"}),
+	})
 	return info, nil
 }
 
@@ -87,6 +103,12 @@ func Follow(ctx context.Context, query string) (string, string, error) {
 	if err := c.FollowArtist(ctx, sp.ID(id)); err != nil {
 		return "", "", fmt.Errorf("follow %s: %w", id, err)
 	}
+	logEvent(ctx, EventRow{
+		Kind:     "library",
+		ArtistID: nullable(id),
+		Source:   nullable("follow"),
+		Payload:  marshalPayload(map[string]any{"action": "follow"}),
+	})
 	return id, name, nil
 }
 
@@ -104,6 +126,12 @@ func Unfollow(ctx context.Context, query string) (string, string, error) {
 	if err := c.UnfollowArtist(ctx, sp.ID(id)); err != nil {
 		return "", "", fmt.Errorf("unfollow %s: %w", id, err)
 	}
+	logEvent(ctx, EventRow{
+		Kind:     "library",
+		ArtistID: nullable(id),
+		Source:   nullable("unfollow"),
+		Payload:  marshalPayload(map[string]any{"action": "unfollow"}),
+	})
 	return id, name, nil
 }
 
@@ -205,6 +233,14 @@ func AddToPlaylist(ctx context.Context, playlistName, query string) (*trackInfo,
 	if _, err := c.AddTracksToPlaylist(ctx, pl.ID, sp.ID(info.TrackID)); err != nil {
 		return nil, nil, fmt.Errorf("add %s to playlist %s: %w", info.TrackID, pl.ID, err)
 	}
+	_ = CacheTrack(ctx, info, -1)
+	logEvent(ctx, EventRow{
+		Kind:     "playlist",
+		TrackID:  nullable(info.TrackID),
+		ArtistID: nullable(info.ArtistID),
+		Source:   nullable("playlist-add"),
+		Payload:  marshalPayload(map[string]any{"playlist": pl.Name}),
+	})
 	return info, pl, nil
 }
 
@@ -227,5 +263,13 @@ func RemoveFromPlaylist(ctx context.Context, playlistName, query string) (*track
 	if _, err := c.RemoveTracksFromPlaylist(ctx, pl.ID, sp.ID(info.TrackID)); err != nil {
 		return nil, nil, fmt.Errorf("remove %s from playlist %s: %w", info.TrackID, pl.ID, err)
 	}
+	_ = CacheTrack(ctx, info, -1)
+	logEvent(ctx, EventRow{
+		Kind:     "playlist",
+		TrackID:  nullable(info.TrackID),
+		ArtistID: nullable(info.ArtistID),
+		Source:   nullable("playlist-remove"),
+		Payload:  marshalPayload(map[string]any{"playlist": pl.Name}),
+	})
 	return info, pl, nil
 }

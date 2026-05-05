@@ -115,7 +115,23 @@ func PlayViaSonos(ctx context.Context, query, room string, opts ...PlayOption) e
 	}
 
 	if !o.continueAfter {
-		return playSpotifyOnSonos(ctx, zone.CoordinatorIP, info, cfg)
+		if err := playSpotifyOnSonos(ctx, zone.CoordinatorIP, info, cfg); err != nil {
+			return err
+		}
+		_ = CacheTrack(ctx, info, -1)
+		logEvent(ctx, EventRow{
+			Kind:     "play_started",
+			TrackID:  nullable(info.TrackID),
+			ArtistID: nullable(info.ArtistID),
+			Zone:     nullable(zone.Name),
+			Source:   nullable("play"),
+			Payload: marshalPayload(map[string]any{
+				"transport":    "sonos",
+				"continuation": false,
+				"queue_size":   1,
+			}),
+		})
+		return nil
 	}
 
 	more, err := artistTopTracks(ctx, info.ArtistID, info.TrackID)
@@ -123,7 +139,23 @@ func PlayViaSonos(ctx context.Context, query, room string, opts ...PlayOption) e
 		return err
 	}
 	tracks := append([]*trackInfo{info}, more...)
-	return playQueueOnSonos(ctx, zone, tracks, cfg)
+	if err := playQueueOnSonos(ctx, zone, tracks, cfg); err != nil {
+		return err
+	}
+	_ = CacheTrack(ctx, info, -1)
+	logEvent(ctx, EventRow{
+		Kind:     "play_started",
+		TrackID:  nullable(info.TrackID),
+		ArtistID: nullable(info.ArtistID),
+		Zone:     nullable(zone.Name),
+		Source:   nullable("play"),
+		Payload: marshalPayload(map[string]any{
+			"transport":    "sonos",
+			"continuation": true,
+			"queue_size":   len(tracks),
+		}),
+	})
+	return nil
 }
 
 // resolveSonosZone discovers Sonos speakers and returns the matched zone's
@@ -145,7 +177,7 @@ func resolveSonosZone(ctx context.Context, room string) (name, ip string, err er
 
 // Pause pauses playback on the Sonos zone matching `room`.
 func Pause(ctx context.Context, room string) error {
-	_, ip, err := resolveSonosZone(ctx, room)
+	name, ip, err := resolveSonosZone(ctx, room)
 	if err != nil {
 		return err
 	}
@@ -154,15 +186,23 @@ func Pause(ctx context.Context, room string) error {
 <s:Body><u:Pause xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
 <InstanceID>0</InstanceID></u:Pause></s:Body>
 </s:Envelope>`
-	_, err = soapCall(ctx, ip, "/MediaRenderer/AVTransport/Control",
-		"urn:schemas-upnp-org:service:AVTransport:1#Pause", body)
-	return err
+	if _, err = soapCall(ctx, ip, "/MediaRenderer/AVTransport/Control",
+		"urn:schemas-upnp-org:service:AVTransport:1#Pause", body); err != nil {
+		return err
+	}
+	logEvent(ctx, EventRow{
+		Kind:    "pause",
+		Zone:    nullable(name),
+		Source:  nullable("pause"),
+		Payload: marshalPayload(map[string]any{}),
+	})
+	return nil
 }
 
 // Resume resumes playback on the Sonos zone matching `room`. Whatever was
 // previously loaded continues from its current position.
 func Resume(ctx context.Context, room string) error {
-	_, ip, err := resolveSonosZone(ctx, room)
+	name, ip, err := resolveSonosZone(ctx, room)
 	if err != nil {
 		return err
 	}
@@ -171,15 +211,23 @@ func Resume(ctx context.Context, room string) error {
 <s:Body><u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
 <InstanceID>0</InstanceID><Speed>1</Speed></u:Play></s:Body>
 </s:Envelope>`
-	_, err = soapCall(ctx, ip, "/MediaRenderer/AVTransport/Control",
-		"urn:schemas-upnp-org:service:AVTransport:1#Play", body)
-	return err
+	if _, err = soapCall(ctx, ip, "/MediaRenderer/AVTransport/Control",
+		"urn:schemas-upnp-org:service:AVTransport:1#Play", body); err != nil {
+		return err
+	}
+	logEvent(ctx, EventRow{
+		Kind:    "resume",
+		Zone:    nullable(name),
+		Source:  nullable("resume"),
+		Payload: marshalPayload(map[string]any{}),
+	})
+	return nil
 }
 
 // Stop stops playback on the Sonos zone matching `room`. Unlike Pause, this
 // clears the current position — Resume after Stop restarts from 00:00.
 func Stop(ctx context.Context, room string) error {
-	_, ip, err := resolveSonosZone(ctx, room)
+	name, ip, err := resolveSonosZone(ctx, room)
 	if err != nil {
 		return err
 	}
@@ -188,14 +236,22 @@ func Stop(ctx context.Context, room string) error {
 <s:Body><u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
 <InstanceID>0</InstanceID></u:Stop></s:Body>
 </s:Envelope>`
-	_, err = soapCall(ctx, ip, "/MediaRenderer/AVTransport/Control",
-		"urn:schemas-upnp-org:service:AVTransport:1#Stop", body)
-	return err
+	if _, err = soapCall(ctx, ip, "/MediaRenderer/AVTransport/Control",
+		"urn:schemas-upnp-org:service:AVTransport:1#Stop", body); err != nil {
+		return err
+	}
+	logEvent(ctx, EventRow{
+		Kind:    "stop",
+		Zone:    nullable(name),
+		Source:  nullable("stop"),
+		Payload: marshalPayload(map[string]any{}),
+	})
+	return nil
 }
 
 // Next advances to the next track in the Sonos zone's queue.
 func Next(ctx context.Context, room string) error {
-	_, ip, err := resolveSonosZone(ctx, room)
+	name, ip, err := resolveSonosZone(ctx, room)
 	if err != nil {
 		return err
 	}
@@ -204,9 +260,21 @@ func Next(ctx context.Context, room string) error {
 <s:Body><u:Next xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
 <InstanceID>0</InstanceID></u:Next></s:Body>
 </s:Envelope>`
-	_, err = soapCall(ctx, ip, "/MediaRenderer/AVTransport/Control",
-		"urn:schemas-upnp-org:service:AVTransport:1#Next", body)
-	return err
+	if _, err = soapCall(ctx, ip, "/MediaRenderer/AVTransport/Control",
+		"urn:schemas-upnp-org:service:AVTransport:1#Next", body); err != nil {
+		return err
+	}
+	// Track ID is unknown at this point — the zone is mid-transition and
+	// GetPositionInfo would race. Downstream queries that want the skipped
+	// track ID can correlate against the most recent play_started for the
+	// same zone.
+	logEvent(ctx, EventRow{
+		Kind:    "skip",
+		Zone:    nullable(name),
+		Source:  nullable("next"),
+		Payload: marshalPayload(map[string]any{}),
+	})
+	return nil
 }
 
 // Volume returns the current volume (0-100) of the Sonos zone matching `room`.
@@ -248,7 +316,7 @@ func SetVolume(ctx context.Context, room string, level int) error {
 	if level > 100 {
 		level = 100
 	}
-	_, ip, err := resolveSonosZone(ctx, room)
+	name, ip, err := resolveSonosZone(ctx, room)
 	if err != nil {
 		return err
 	}
@@ -257,9 +325,17 @@ func SetVolume(ctx context.Context, room string, level int) error {
 <s:Body><u:SetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
 <InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>%d</DesiredVolume></u:SetVolume></s:Body>
 </s:Envelope>`, level)
-	_, err = soapCall(ctx, ip, "/MediaRenderer/RenderingControl/Control",
-		"urn:schemas-upnp-org:service:RenderingControl:1#SetVolume", body)
-	return err
+	if _, err = soapCall(ctx, ip, "/MediaRenderer/RenderingControl/Control",
+		"urn:schemas-upnp-org:service:RenderingControl:1#SetVolume", body); err != nil {
+		return err
+	}
+	logEvent(ctx, EventRow{
+		Kind:    "volume",
+		Zone:    nullable(name),
+		Source:  nullable("vol"),
+		Payload: marshalPayload(map[string]any{"level": level}),
+	})
+	return nil
 }
 
 // CurrentTrack describes what a Sonos zone is currently playing. Used for
@@ -678,6 +754,18 @@ func EnqueueViaSonos(ctx context.Context, query, room string) (*EnqueueResult, e
 	if err != nil {
 		return nil, err
 	}
+	_ = CacheTrack(ctx, info, -1)
+	logEvent(ctx, EventRow{
+		Kind:     "enqueue",
+		TrackID:  nullable(info.TrackID),
+		ArtistID: nullable(info.ArtistID),
+		Zone:     nullable(name),
+		Source:   nullable("enqueue"),
+		Payload: marshalPayload(map[string]any{
+			"position":   res.Position,
+			"new_length": res.NewLength,
+		}),
+	})
 	return &EnqueueResult{Zone: name, Position: res.Position, NewLength: res.NewLength}, nil
 }
 

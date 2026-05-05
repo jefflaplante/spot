@@ -420,5 +420,19 @@ func Play(ctx context.Context, query, room string, opts ...PlayOption) error {
 	}); err != nil {
 		return fmt.Errorf("play on %s: %w", dev.Name, err)
 	}
+
+	// Best-effort: cache the seed track and log a play_started event.
+	_ = CacheTrack(ctx, info, -1)
+	logEvent(ctx, EventRow{
+		Kind:     "play_started",
+		TrackID:  nullable(info.TrackID),
+		ArtistID: nullable(info.ArtistID),
+		Zone:     nullable(dev.Name),
+		Source:   nullable("play"),
+		Payload: marshalPayload(map[string]any{
+			"transport":    "connect",
+			"continuation": o.continueAfter,
+		}),
+	})
 	return nil
 }
