@@ -4,12 +4,14 @@ A small Go library and `spot` CLI that play Spotify tracks on Sonos (or any
 other Spotify Connect device) via the Spotify Web API. Designed for an agent
 harness running on a headless Linux VM.
 
-Two ways to use it:
+Three ways to use it:
 
 - **Library** — `import "github.com/jefflaplante/spotify"` and call
   `spotify.Play(ctx, query, room)` from Go code.
 - **CLI** — `spot play "bonobo migration" "Living Room"` from a shell or
   subprocess.
+- **Claude Code skill** — natural-language control from inside Claude
+  Code (e.g. "play Bonobo in the parlor"). See [`skills/`](skills/).
 
 Sonos appears to Spotify as a Connect device once you've linked your Spotify
 account in the Sonos app, so this driver doesn't stream audio itself — it
@@ -386,6 +388,9 @@ on demand; the unit above just illustrates env wiring.
 │                      #   plus diagnostic helpers (BrowseQueueRaw,
 │                      #   CurrentTrackFor, SpotifyServiceFor)
 ├── Makefile           # build / install / vet / fmt / tidy / clean
+├── skills/            # Claude Code skill that wraps the CLI
+│   ├── README.md
+│   └── spot/SKILL.md
 ├── go.mod / go.sum
 └── README.md
 ```
