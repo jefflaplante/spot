@@ -544,7 +544,7 @@ spot rabbithole --explain
 
 ### Playback
 
-#### `spot play <query> <zone> [-v connect|sonos] [-c]`
+#### `spot play <query> <zone> [-v connect|sonos] [-c] [-s]`
 
 Search Spotify for `<query>` and start playback on `<zone>`.
 
@@ -556,11 +556,13 @@ Search Spotify for `<query>` and start playback on `<zone>`.
 |----------------|-----------|--------------------------------------------------------------------------------------------------|
 | `-v`, `--via`  | `connect` | Playback transport. `connect` uses the Spotify Web API; `sonos` uses UPnP directly to the zone.  |
 | `-c`, `--continue` | off   | After the seed track, queue the artist's top tracks (~10 more) so the music keeps playing.       |
+| `-s`, `--shuffle`  | off   | With `-c`, broaden the candidate pool with a random sample of the artist's album cuts and shuffle. Repeated invocations produce different track sets. The seed track still plays first. |
 
 ```bash
 spot play "bonobo migration" "Living Room"               # via Spotify Connect
 spot play -v sonos "subtronics drums" Parlor             # via Sonos UPnP
 spot play -c -v sonos "armin van buuren" Parlor          # seed + 10 more, on Sonos
+spot play -c -s -v sonos "underworld" Parlor             # different tracks each time
 spot play "spotify:track:4cOdK2wGLETKBW3PvgPWqT" Kitchen # exact URI
 ```
 
@@ -593,6 +595,21 @@ advance to.
 spot next Parlor
 spot skip Parlor   # same thing
 ```
+
+#### `spot shuffle <zone> [off]`
+
+Toggle the zone's Sonos shuffle mode. Default arg turns shuffle **on**
+(`SHUFFLE_NOREPEAT`); pass `off` to restore sequential playback. The
+queue's stored order isn't physically changed — Sonos just plays items
+in random order while shuffle is on.
+
+```bash
+spot shuffle Parlor          # turn shuffle on
+spot shuffle Parlor off      # turn it off
+```
+
+For *content-level* entropy (different tracks each time you ask for an
+artist), use the `-s` flag on `spot play` — see that command.
 
 ### Queue
 

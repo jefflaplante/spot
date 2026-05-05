@@ -1,6 +1,6 @@
 ---
 name: spot
-description: Use when the user wants to control Spotify playback on Sonos speakers, get personalized recommendations from their own Spotify history, or curate their library — play, pause, resume, skip, stop, queue, browse, change volume, check what's playing, see top tracks/artists, list recents/likes/follows/playlists, like/follow/save the current track, build mixes, daily picks, deeper cuts, fresh releases, or "more like this", and record love/hate/skip-forever feedback or notes for what's playing. Triggers on phrases like "play X on <zone>", "pause the parlor", "what's playing in the kitchen", "skip this track", "turn down the volume", "add X to the queue", "list my speakers", "what are my top tracks", "what have I been playing", "show my liked songs", "list my playlists", "I love this", "I hate this", "save this song", "save this track", "queue up my favorites", "make me a playlist", "make me a mix", "play me something I'd love", "play me my morning music", "play me a daily mix", "what should I listen to today", "what's new from artists I follow", "deeper cuts from <artist>", "what does this artist sound like beyond the hits", "play me something like <artist>", "more like this", "what I've been into", "music for my morning", "why did you pick that". Wraps the local `spot` CLI; do NOT trigger for general music questions or playback in non-Sonos contexts.
+description: Use when the user wants to control Spotify playback on Sonos speakers, get personalized recommendations from their own Spotify history, or curate their library — play, pause, resume, skip, stop, shuffle, queue, browse, change volume, check what's playing, see top tracks/artists, list recents/likes/follows/playlists, like/follow/save the current track, build mixes, daily picks, deeper cuts, fresh releases, or "more like this", and record love/hate/skip-forever feedback or notes for what's playing. Triggers on phrases like "play X on <zone>", "pause the parlor", "what's playing in the kitchen", "skip this track", "shuffle the kitchen", "turn shuffle on/off", "mix it up", "add X to the queue", "turn down the volume", "list my speakers", "what are my top tracks", "what have I been playing", "show my liked songs", "list my playlists", "I love this", "I hate this", "save this song", "save this track", "queue up my favorites", "make me a playlist", "make me a mix", "play me something I'd love", "play me my morning music", "play me a daily mix", "what should I listen to today", "what's new from artists I follow", "deeper cuts from <artist>", "what does this artist sound like beyond the hits", "play me something like <artist>", "more like this", "what I've been into", "music for my morning", "why did you pick that". Wraps the local `spot` CLI; do NOT trigger for general music questions or playback in non-Sonos contexts.
 ---
 
 # Spotify on Sonos via the `spot` CLI
@@ -66,6 +66,17 @@ want continuous music, not a single track that stops dead. Drop `-c`
 only if the user explicitly says "just one track" or names a single song
 in a way that implies they want only that.
 
+**Default to `-s` (shuffle) on top of `-c` when the query is an
+artist-style request** — bare artist names like "play underworld",
+"play armin van buuren", "put on some bonobo". With `-c -s`, the
+candidate pool is broadened (artist top tracks plus a random album-cut
+sample) and shuffled, so repeated requests don't produce the same
+playlist. **Drop `-s` when the query is specific:**
+- A Spotify track URI (`spotify:track:…`)
+- Field-search syntax (`track:"…" album:"…"`)
+- "Play album X" / "play playlist Y" — deterministic context
+- A specific song name the user clearly wants ("play born slippy")
+
 ## Queue
 
 ```bash
@@ -93,6 +104,16 @@ only if they explicitly say "stop and reset" or similar.
 `next` only does anything if a queue is loaded. If `now` shows a track
 that arrived via `play -v sonos` without `-c`, `next` will halt
 playback. Mention this if the user is surprised.
+
+```bash
+spot shuffle "<zone>"        # turn shuffle on (SHUFFLE_NOREPEAT)
+spot shuffle "<zone>" off    # turn it off (NORMAL)
+```
+
+`shuffle` flips the speaker's playback mode without rearranging the
+queue. For *content* entropy (different artist's-top-tracks set each
+invocation), use `play -c -s` instead — that's about which tracks get
+queued, not playback order over a fixed queue.
 
 ## Volume
 
@@ -232,6 +253,9 @@ appears wrong.
 | "pause Y" / "stop the music in Y"           | `spot pause "Y"`                                  |
 | "resume Y" / "play (no track) in Y"         | `spot resume "Y"`                                 |
 | "skip" / "next track in Y"                  | `spot next "Y"`                                   |
+| "shuffle Y" / "shuffle on" / "mix it up"    | `spot shuffle "Y"`                                |
+| "stop shuffling Y" / "shuffle off"          | `spot shuffle "Y" off`                            |
+| "play <artist> on Y" (artist-style query)   | `spot play -v sonos -c -s "<artist>" "Y"`         |
 | "what's playing in Y"                       | `spot now "Y"`                                    |
 | "show the queue for Y"                      | `spot queue "Y"`                                  |
 | "add X to Y's queue"                        | `spot enqueue "X" "Y"`                            |

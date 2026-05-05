@@ -578,6 +578,46 @@ the queue, start it with "spot play -v sonos -c <something> <zone>" first
 	})
 
 	root.AddCommand(&cobra.Command{
+		Use:   "shuffle <zone> [off]",
+		Short: "Toggle Sonos shuffle playback on a zone",
+		Long: `Sets the zone's PlayMode to SHUFFLE_NOREPEAT (random playback order
+across the queue) by default. Pass "off" to restore NORMAL mode.
+
+The queue's stored order isn't physically changed — Sonos just plays
+items in a random order while shuffle is on.`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			on := true
+			if len(args) == 2 {
+				switch strings.ToLower(args[1]) {
+				case "off", "false", "0":
+					on = false
+				case "on", "true", "1":
+					on = true
+				default:
+					return fmt.Errorf("expected 'on' or 'off', got %q", args[1])
+				}
+			}
+			if err := spot.SetShuffle(cmd.Context(), args[0], on); err != nil {
+				return err
+			}
+			state := "on"
+			if !on {
+				state = "off"
+			}
+			return emit(struct {
+				OK      bool   `json:"ok"`
+				Command string `json:"command"`
+				Zone    string `json:"zone"`
+				State   string `json:"state"`
+			}{OK: true, Command: "shuffle", Zone: args[0], State: state}, func() error {
+				fmt.Printf("%s: shuffle %s\n", args[0], state)
+				return nil
+			})
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
 		Use:   "stop <zone>",
 		Short: "Stop playback on a Sonos zone (resets position to start)",
 		Args:  cobra.ExactArgs(1),
@@ -1697,6 +1737,7 @@ the track list.`,
 
 	var via string
 	var continuePlay bool
+	var shufflePlay bool
 	playCmd := &cobra.Command{
 		Use:   `play <query> <room>`,
 		Short: "Search for a track and play it on a named device or zone",
@@ -1717,12 +1758,22 @@ Transport (-v / --via):
 Continuation (-c / --continue):
   After the seed track, queue the primary artist's top tracks (~10 more).
   In Connect mode they're passed as a URI list to start_playback. In Sonos
-  mode they're added to the speaker's queue and the queue is played.`,
+  mode they're added to the speaker's queue and the queue is played.
+
+Shuffle entropy (-s / --shuffle):
+  With -c, broaden the candidate pool (artist top tracks + a random
+  sample of album cuts) and shuffle. Repeated invocations produce
+  different track sets — useful when you say "play <artist>" and don't
+  want the same playlist every time. Has no effect without -c. The seed
+  track still plays first; only the continuation is randomized.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var opts []spot.PlayOption
 			if continuePlay {
 				opts = append(opts, spot.WithContinue())
+			}
+			if shufflePlay {
+				opts = append(opts, spot.WithShuffle())
 			}
 			switch via {
 			case "", "connect":
@@ -1741,6 +1792,7 @@ Continuation (-c / --continue):
 	}
 	playCmd.Flags().StringVarP(&via, "via", "v", "connect", "playback transport: connect | sonos")
 	playCmd.Flags().BoolVarP(&continuePlay, "continue", "c", false, "after the seed track, queue more from the primary artist")
+	playCmd.Flags().BoolVarP(&shufflePlay, "shuffle", "s", false, "with -c, broaden the pool with album cuts and shuffle (different tracks each invocation)")
 	root.AddCommand(playCmd)
 
 	root.AddCommand(newFeedbackCmd())

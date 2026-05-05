@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	mrand "math/rand/v2"
 	"net/http"
 	"os"
 	"strings"
@@ -223,6 +224,7 @@ type PlayOption func(*playOpts)
 
 type playOpts struct {
 	continueAfter bool
+	shuffle       bool
 }
 
 // WithContinue tells Play (or PlayViaSonos) to keep playing related music
@@ -230,6 +232,15 @@ type playOpts struct {
 // artist's top tracks. Without this option, a single track is played.
 func WithContinue() PlayOption {
 	return func(o *playOpts) { o.continueAfter = true }
+}
+
+// WithShuffle adds entropy to the continuation queue: the candidate pool
+// is broadened (artist top tracks plus a random sample of album cuts) and
+// shuffled, so repeated `play -c -s "<artist>"` invocations produce
+// different track sets. Has no effect without WithContinue. The seed track
+// still plays first.
+func WithShuffle() PlayOption {
+	return func(o *playOpts) { o.shuffle = true }
 }
 
 // trackInfo is a seed track resolved from a query. Carries the metadata
@@ -346,6 +357,83 @@ func artistTopTracks(ctx context.Context, artistID, excludeID string) ([]*trackI
 	return out, nil
 }
 
+// gatherContinuationTracks builds the list of tracks to queue after the
+// seed track when WithContinue is set. Without shuffle, it returns the
+// artist's top tracks in API-default order (deterministic). With shuffle,
+// it broadens the pool with random samples from the artist's recent
+// albums, dedupes, and shuffles, so repeated invocations vary.
+func gatherContinuationTracks(ctx context.Context, info *trackInfo, shuffle bool) ([]*trackInfo, error) {
+	top, err := artistTopTracks(ctx, info.ArtistID, info.TrackID)
+	if err != nil {
+		return nil, err
+	}
+	if !shuffle {
+		return top, nil
+	}
+
+	// Best-effort: extra album cuts. If the API call fails, fall back to
+	// just shuffling the top tracks.
+	extra, _ := artistRandomAlbumCuts(ctx, info.ArtistID, info.TrackID, 5)
+
+	pool := append([]*trackInfo{}, top...)
+	seen := make(map[string]bool, len(pool))
+	for _, t := range pool {
+		seen[t.TrackID] = true
+	}
+	for _, t := range extra {
+		if !seen[t.TrackID] {
+			pool = append(pool, t)
+			seen[t.TrackID] = true
+		}
+	}
+	mrand.Shuffle(len(pool), func(i, j int) {
+		pool[i], pool[j] = pool[j], pool[i]
+	})
+	return pool, nil
+}
+
+// artistRandomAlbumCuts returns one random track from each of up to N of
+// the artist's albums (full-length only — singles excluded). Used to
+// broaden the candidate pool for play -c -s beyond just top tracks.
+func artistRandomAlbumCuts(ctx context.Context, artistID, excludeID string, n int) ([]*trackInfo, error) {
+	c, err := getClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	page, err := c.GetArtistAlbums(ctx, sp.ID(artistID), []sp.AlbumType{sp.AlbumTypeAlbum})
+	if err != nil {
+		return nil, err
+	}
+	if page == nil || len(page.Albums) == 0 {
+		return nil, nil
+	}
+	if n > len(page.Albums) {
+		n = len(page.Albums)
+	}
+	out := make([]*trackInfo, 0, n)
+	for i := 0; i < n; i++ {
+		album := page.Albums[i]
+		full, err := c.GetAlbum(ctx, album.ID)
+		if err != nil || full == nil || len(full.Tracks.Tracks) == 0 {
+			continue
+		}
+		tr := full.Tracks.Tracks[mrand.IntN(len(full.Tracks.Tracks))]
+		info := &trackInfo{
+			TrackID:  string(tr.ID),
+			ArtistID: artistID,
+			Title:    tr.Name,
+			Album:    full.Name,
+		}
+		if len(tr.Artists) > 0 {
+			info.Artist = tr.Artists[0].Name
+		}
+		if info.TrackID != "" && info.TrackID != excludeID {
+			out = append(out, info)
+		}
+	}
+	return out, nil
+}
+
 // Play searches for `query` (free-text or "spotify:track:..." URI) and starts
 // playback on a device whose name contains `room` (case-insensitive substring).
 //
@@ -371,7 +459,7 @@ func Play(ctx context.Context, query, room string, opts ...PlayOption) error {
 	}
 	uris := []sp.URI{sp.URI("spotify:track:" + info.TrackID)}
 	if o.continueAfter {
-		more, err := artistTopTracks(ctx, info.ArtistID, info.TrackID)
+		more, err := gatherContinuationTracks(ctx, info, o.shuffle)
 		if err != nil {
 			return err
 		}

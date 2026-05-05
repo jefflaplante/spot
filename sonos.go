@@ -134,7 +134,7 @@ func PlayViaSonos(ctx context.Context, query, room string, opts ...PlayOption) e
 		return nil
 	}
 
-	more, err := artistTopTracks(ctx, info.ArtistID, info.TrackID)
+	more, err := gatherContinuationTracks(ctx, info, o.shuffle)
 	if err != nil {
 		return err
 	}
@@ -152,6 +152,7 @@ func PlayViaSonos(ctx context.Context, query, room string, opts ...PlayOption) e
 		Payload: marshalPayload(map[string]any{
 			"transport":    "sonos",
 			"continuation": true,
+			"shuffle":      o.shuffle,
 			"queue_size":   len(tracks),
 		}),
 	})
@@ -250,6 +251,37 @@ func Stop(ctx context.Context, room string) error {
 }
 
 // Next advances to the next track in the Sonos zone's queue.
+// SetShuffle enables or disables shuffle playback on a Sonos zone.
+// Sonos's SHUFFLE_NOREPEAT mode randomizes the playback order across the
+// queue without physically reordering it — turning shuffle off restores
+// sequential playback from the same items.
+func SetShuffle(ctx context.Context, room string, on bool) error {
+	name, ip, err := resolveSonosZone(ctx, room)
+	if err != nil {
+		return err
+	}
+	mode := "NORMAL"
+	if on {
+		mode = "SHUFFLE_NOREPEAT"
+	}
+	body := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+<s:Body><u:SetPlayMode xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+<InstanceID>0</InstanceID><NewPlayMode>%s</NewPlayMode></u:SetPlayMode></s:Body>
+</s:Envelope>`, mode)
+	if _, err = soapCall(ctx, ip, "/MediaRenderer/AVTransport/Control",
+		"urn:schemas-upnp-org:service:AVTransport:1#SetPlayMode", body); err != nil {
+		return err
+	}
+	logEvent(ctx, EventRow{
+		Kind:    "shuffle",
+		Zone:    nullable(name),
+		Source:  nullable("shuffle"),
+		Payload: marshalPayload(map[string]any{"on": on}),
+	})
+	return nil
+}
+
 func Next(ctx context.Context, room string) error {
 	name, ip, err := resolveSonosZone(ctx, room)
 	if err != nil {
