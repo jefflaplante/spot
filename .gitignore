@@ -18,3 +18,4 @@
 
 # Go
 vendor/
+/.claude/
