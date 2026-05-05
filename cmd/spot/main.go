@@ -27,10 +27,51 @@ import (
 
 const defaultVolumeStep = 5
 
+// jsonOutput is set by the persistent --json root flag and consumed by emit
+// in output.go.
+var jsonOutput bool
+
 // trimZeroHour drops a leading "0:" from Sonos's hh:mm:ss timestamps so
 // "0:03:13" displays as "03:13".
 func trimZeroHour(t string) string {
 	return strings.TrimPrefix(t, "0:")
+}
+
+// okResult is the JSON envelope returned by commands that have no other
+// useful output on success (pause, resume, stop, next/skip, play).
+type okResult struct {
+	OK      bool   `json:"ok"`
+	Command string `json:"command"`
+	Zone    string `json:"zone,omitempty"`
+}
+
+// deviceJSON is the JSON shape used by `spot devices`.
+type deviceJSON struct {
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	ID         string `json:"id"`
+	Active     bool   `json:"active"`
+	Restricted bool   `json:"restricted"`
+	Volume     int    `json:"volume,omitempty"`
+}
+
+// zoneJSON is the JSON shape used by `spot zones`.
+type zoneJSON struct {
+	Name          string `json:"name"`
+	CoordinatorIP string `json:"coordinator_ip"`
+	UUID          string `json:"uuid,omitempty"`
+}
+
+// volumeJSON is the JSON shape used by `spot vol` (both query and set).
+type volumeJSON struct {
+	Zone   string `json:"zone"`
+	Volume int    `json:"volume"`
+}
+
+// queueRawJSON wraps the raw DIDL-Lite XML when `--raw --json` are combined.
+type queueRawJSON struct {
+	Zone string `json:"zone"`
+	XML  string `json:"xml"`
 }
 
 func main() {
@@ -43,13 +84,17 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: false,
 	}
+	root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON instead of human-readable output")
 
 	root.AddCommand(&cobra.Command{
 		Use:   "auth",
 		Short: "Run the one-time OAuth bootstrap and write the token cache",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return spot.Authenticate(cmd.Context())
+			if err := spot.Authenticate(cmd.Context()); err != nil {
+				return err
+			}
+			return emit(okResult{OK: true, Command: "auth"}, nil)
 		},
 	})
 
@@ -69,17 +114,30 @@ zone will then register as a Spotify Connect device and appear here.`,
 			if err != nil {
 				return err
 			}
-			if len(devs) == 0 {
-				fmt.Fprintln(os.Stderr, "no devices visible to Spotify")
-				fmt.Fprintln(os.Stderr, "open the Spotify app, pick the Sonos zone via the Connect/devices icon, play any track, then retry")
-				return nil
-			}
-			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "NAME\tTYPE\tACTIVE\tRESTRICTED\tID")
+			out := make([]deviceJSON, 0, len(devs))
 			for _, d := range devs {
-				fmt.Fprintf(tw, "%s\t%s\t%t\t%t\t%s\n", d.Name, d.Type, d.Active, d.Restricted, d.ID)
+				out = append(out, deviceJSON{
+					Name:       d.Name,
+					Type:       d.Type,
+					ID:         string(d.ID),
+					Active:     d.Active,
+					Restricted: d.Restricted,
+					Volume:     int(d.Volume),
+				})
 			}
-			return tw.Flush()
+			return emit(out, func() error {
+				if len(devs) == 0 {
+					fmt.Fprintln(os.Stderr, "no devices visible to Spotify")
+					fmt.Fprintln(os.Stderr, "open the Spotify app, pick the Sonos zone via the Connect/devices icon, play any track, then retry")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "NAME\tTYPE\tACTIVE\tRESTRICTED\tID")
+				for _, d := range devs {
+					fmt.Fprintf(tw, "%s\t%s\t%t\t%t\t%s\n", d.Name, d.Type, d.Active, d.Restricted, d.ID)
+				}
+				return tw.Flush()
+			})
 		},
 	})
 
@@ -98,16 +156,22 @@ network (common in some VM/container setups).`,
 			if err != nil {
 				return err
 			}
-			if len(zones) == 0 {
-				fmt.Fprintln(os.Stderr, "no Sonos zones found")
-				return nil
-			}
-			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "ZONE\tCOORDINATOR")
+			out := make([]zoneJSON, 0, len(zones))
 			for _, z := range zones {
-				fmt.Fprintf(tw, "%s\t%s\n", z.Name, z.CoordinatorIP)
+				out = append(out, zoneJSON{Name: z.Name, CoordinatorIP: z.CoordinatorIP, UUID: z.UUID})
 			}
-			return tw.Flush()
+			return emit(out, func() error {
+				if len(zones) == 0 {
+					fmt.Fprintln(os.Stderr, "no Sonos zones found")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "ZONE\tCOORDINATOR")
+				for _, z := range zones {
+					fmt.Fprintf(tw, "%s\t%s\n", z.Name, z.CoordinatorIP)
+				}
+				return tw.Flush()
+			})
 		},
 	})
 
@@ -116,7 +180,10 @@ network (common in some VM/container setups).`,
 		Short: "Pause playback on a Sonos zone",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return spot.Pause(cmd.Context(), args[0])
+			if err := spot.Pause(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			return emit(okResult{OK: true, Command: "pause", Zone: args[0]}, nil)
 		},
 	})
 
@@ -125,7 +192,10 @@ network (common in some VM/container setups).`,
 		Short: "Resume playback on a Sonos zone (continues from current position)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return spot.Resume(cmd.Context(), args[0])
+			if err := spot.Resume(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			return emit(okResult{OK: true, Command: "resume", Zone: args[0]}, nil)
 		},
 	})
 
@@ -143,9 +213,16 @@ the queue, start it with "spot play -v sonos -c <something> <zone>" first
 			if err != nil {
 				return err
 			}
-			fmt.Printf("%s: queued at position %d (queue now has %d tracks)\n",
-				res.Zone, res.Position, res.NewLength)
-			return nil
+			out := struct {
+				Zone      string `json:"zone"`
+				Position  int    `json:"position"`
+				NewLength int    `json:"new_length"`
+			}{Zone: res.Zone, Position: res.Position, NewLength: res.NewLength}
+			return emit(out, func() error {
+				fmt.Printf("%s: queued at position %d (queue now has %d tracks)\n",
+					res.Zone, res.Position, res.NewLength)
+				return nil
+			})
 		},
 	})
 
@@ -160,38 +237,67 @@ the queue, start it with "spot play -v sonos -c <something> <zone>" first
 				if err != nil {
 					return err
 				}
-				fmt.Println(xmlStr)
-				return nil
+				return emit(queueRawJSON{Zone: args[0], XML: xmlStr}, func() error {
+					fmt.Println(xmlStr)
+					return nil
+				})
 			}
 			q, err := spot.ShowQueue(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
-			if len(q.Tracks) == 0 {
-				fmt.Printf("%s: queue is empty\n", q.Zone)
-				return nil
+			type queueTrackJSON struct {
+				Position int    `json:"position"`
+				Title    string `json:"title"`
+				Artist   string `json:"artist"`
+				Album    string `json:"album"`
+				URI      string `json:"uri"`
+				Current  bool   `json:"current"`
 			}
-			if q.Position > 0 {
-				fmt.Printf("%s — %d tracks, playing %d\n", q.Zone, len(q.Tracks), q.Position)
-			} else {
-				fmt.Printf("%s — %d tracks (zone not playing from queue)\n", q.Zone, len(q.Tracks))
-			}
-			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			tracks := make([]queueTrackJSON, 0, len(q.Tracks))
 			for i, t := range q.Tracks {
-				mark := " "
-				if i+1 == q.Position {
-					mark = ">"
-				}
-				label := t.Title
-				if t.Artist != "" {
-					label = t.Artist + " — " + t.Title
-				}
-				if label == "" {
-					label = "(no metadata) " + t.URI
-				}
-				fmt.Fprintf(tw, "%s\t%d\t%s\n", mark, i+1, label)
+				tracks = append(tracks, queueTrackJSON{
+					Position: i + 1,
+					Title:    t.Title,
+					Artist:   t.Artist,
+					Album:    t.Album,
+					URI:      t.URI,
+					Current:  i+1 == q.Position,
+				})
 			}
-			return tw.Flush()
+			out := struct {
+				Zone     string           `json:"zone"`
+				Position int              `json:"position"`
+				Length   int              `json:"length"`
+				Tracks   []queueTrackJSON `json:"tracks"`
+			}{Zone: q.Zone, Position: q.Position, Length: len(q.Tracks), Tracks: tracks}
+			return emit(out, func() error {
+				if len(q.Tracks) == 0 {
+					fmt.Printf("%s: queue is empty\n", q.Zone)
+					return nil
+				}
+				if q.Position > 0 {
+					fmt.Printf("%s — %d tracks, playing %d\n", q.Zone, len(q.Tracks), q.Position)
+				} else {
+					fmt.Printf("%s — %d tracks (zone not playing from queue)\n", q.Zone, len(q.Tracks))
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				for i, t := range q.Tracks {
+					mark := " "
+					if i+1 == q.Position {
+						mark = ">"
+					}
+					label := t.Title
+					if t.Artist != "" {
+						label = t.Artist + " — " + t.Title
+					}
+					if label == "" {
+						label = "(no metadata) " + t.URI
+					}
+					fmt.Fprintf(tw, "%s\t%d\t%s\n", mark, i+1, label)
+				}
+				return tw.Flush()
+			})
 		},
 	}
 	queueCmd.Flags().BoolVar(&queueRaw, "raw", false, "print the raw DIDL-Lite XML returned by Sonos for debugging")
@@ -203,7 +309,10 @@ the queue, start it with "spot play -v sonos -c <something> <zone>" first
 		Short:   "Skip to the next track in the zone's queue",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return spot.Next(cmd.Context(), args[0])
+			if err := spot.Next(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			return emit(okResult{OK: true, Command: "next", Zone: args[0]}, nil)
 		},
 	})
 
@@ -212,7 +321,10 @@ the queue, start it with "spot play -v sonos -c <something> <zone>" first
 		Short: "Stop playback on a Sonos zone (resets position to start)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return spot.Stop(cmd.Context(), args[0])
+			if err := spot.Stop(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			return emit(okResult{OK: true, Command: "stop", Zone: args[0]}, nil)
 		},
 	})
 
@@ -237,8 +349,10 @@ After any change, the new volume is printed (clamped to 0-100).`,
 				if err != nil {
 					return err
 				}
-				fmt.Println(v)
-				return nil
+				return emit(volumeJSON{Zone: zone, Volume: v}, func() error {
+					fmt.Println(v)
+					return nil
+				})
 			}
 			step := defaultVolumeStep
 			if len(args) == 3 {
@@ -279,8 +393,10 @@ After any change, the new volume is printed (clamped to 0-100).`,
 			if err := spot.SetVolume(cmd.Context(), zone, target); err != nil {
 				return err
 			}
-			fmt.Println(target)
-			return nil
+			return emit(volumeJSON{Zone: zone, Volume: target}, func() error {
+				fmt.Println(target)
+				return nil
+			})
 		},
 	})
 
@@ -298,28 +414,51 @@ started via spot, the Sonos app, Spotify Connect, or anything else.`,
 				return err
 			}
 			state := strings.ToLower(strings.ReplaceAll(p.State, "_PLAYBACK", ""))
-			fmt.Printf("%s (%s)\n", p.Zone, state)
-			if p.Title == "" && p.URI == "" {
-				fmt.Println("  nothing loaded")
+			out := struct {
+				Zone        string `json:"zone"`
+				State       string `json:"state"`
+				Title       string `json:"title,omitempty"`
+				Artist      string `json:"artist,omitempty"`
+				Album       string `json:"album,omitempty"`
+				Duration    string `json:"duration,omitempty"`
+				Position    string `json:"position,omitempty"`
+				URI         string `json:"uri,omitempty"`
+				AlbumArtURI string `json:"album_art_uri,omitempty"`
+			}{
+				Zone:        p.Zone,
+				State:       state,
+				Title:       p.Title,
+				Artist:      p.Artist,
+				Album:       p.Album,
+				Duration:    p.Duration,
+				Position:    p.Position,
+				URI:         p.URI,
+				AlbumArtURI: p.AlbumArtURI,
+			}
+			return emit(out, func() error {
+				fmt.Printf("%s (%s)\n", p.Zone, state)
+				if p.Title == "" && p.URI == "" {
+					fmt.Println("  nothing loaded")
+					return nil
+				}
+				if p.Artist != "" {
+					fmt.Printf("  %s — %s\n", p.Artist, p.Title)
+				} else if p.Title != "" {
+					fmt.Printf("  %s\n", p.Title)
+				}
+				if p.Album != "" {
+					fmt.Printf("  album: %s\n", p.Album)
+				}
+				if p.Duration != "" && p.Duration != "0:00:00" {
+					fmt.Printf("  %s / %s\n", trimZeroHour(p.Position), trimZeroHour(p.Duration))
+				} else if p.Position != "" {
+					fmt.Printf("  %s\n", trimZeroHour(p.Position))
+				}
+				if p.Title == "" && p.URI != "" {
+					fmt.Printf("  uri: %s\n", p.URI)
+				}
 				return nil
-			}
-			if p.Artist != "" {
-				fmt.Printf("  %s — %s\n", p.Artist, p.Title)
-			} else if p.Title != "" {
-				fmt.Printf("  %s\n", p.Title)
-			}
-			if p.Album != "" {
-				fmt.Printf("  album: %s\n", p.Album)
-			}
-			if p.Duration != "" && p.Duration != "0:00:00" {
-				fmt.Printf("  %s / %s\n", trimZeroHour(p.Position), trimZeroHour(p.Duration))
-			} else if p.Position != "" {
-				fmt.Printf("  %s\n", trimZeroHour(p.Position))
-			}
-			if p.Title == "" && p.URI != "" {
-				fmt.Printf("  uri: %s\n", p.URI)
-			}
-			return nil
+			})
 		},
 	})
 
@@ -339,11 +478,19 @@ match what Sonos expects for your specific Spotify SMAPI integration.`,
 			if err != nil {
 				return err
 			}
-			fmt.Printf("zone:        %s\n", info.Zone)
-			fmt.Printf("coordinator: %s\n", info.IP)
-			fmt.Printf("\nTrackURI:\n  %s\n", info.URI)
-			fmt.Printf("\nTrackMetaData:\n  %s\n", info.MetadataXML)
-			return nil
+			out := struct {
+				Zone        string `json:"zone"`
+				Coordinator string `json:"coordinator"`
+				URI         string `json:"uri"`
+				MetadataXML string `json:"metadata_xml"`
+			}{Zone: info.Zone, Coordinator: info.IP, URI: info.URI, MetadataXML: info.MetadataXML}
+			return emit(out, func() error {
+				fmt.Printf("zone:        %s\n", info.Zone)
+				fmt.Printf("coordinator: %s\n", info.IP)
+				fmt.Printf("\nTrackURI:\n  %s\n", info.URI)
+				fmt.Printf("\nTrackMetaData:\n  %s\n", info.MetadataXML)
+				return nil
+			})
 		},
 	})
 
@@ -360,12 +507,21 @@ spot will use when playing on this zone.`,
 			if err != nil {
 				return err
 			}
-			fmt.Printf("zone:        %s\n", info.Zone)
-			fmt.Printf("coordinator: %s\n", info.IP)
-			fmt.Printf("sid:         %d\n", info.SID)
-			fmt.Printf("type:        %d\n", info.Type)
-			fmt.Printf("sn:          %d  (override with SONOS_SN env var)\n", info.SN)
-			return nil
+			out := struct {
+				Zone        string `json:"zone"`
+				Coordinator string `json:"coordinator"`
+				SID         int    `json:"sid"`
+				Type        int    `json:"type"`
+				SN          int    `json:"sn"`
+			}{Zone: info.Zone, Coordinator: info.IP, SID: info.SID, Type: info.Type, SN: info.SN}
+			return emit(out, func() error {
+				fmt.Printf("zone:        %s\n", info.Zone)
+				fmt.Printf("coordinator: %s\n", info.IP)
+				fmt.Printf("sid:         %d\n", info.SID)
+				fmt.Printf("type:        %d\n", info.Type)
+				fmt.Printf("sn:          %d  (override with SONOS_SN env var)\n", info.SN)
+				return nil
+			})
 		},
 	})
 
@@ -400,12 +556,17 @@ Continuation (-c / --continue):
 			}
 			switch via {
 			case "", "connect":
-				return spot.Play(cmd.Context(), args[0], args[1], opts...)
+				if err := spot.Play(cmd.Context(), args[0], args[1], opts...); err != nil {
+					return err
+				}
 			case "sonos":
-				return spot.PlayViaSonos(cmd.Context(), args[0], args[1], opts...)
+				if err := spot.PlayViaSonos(cmd.Context(), args[0], args[1], opts...); err != nil {
+					return err
+				}
 			default:
 				return fmt.Errorf("unknown --via=%q (expected 'connect' or 'sonos')", via)
 			}
+			return emit(okResult{OK: true, Command: "play", Zone: args[1]}, nil)
 		},
 	}
 	playCmd.Flags().StringVarP(&via, "via", "v", "connect", "playback transport: connect | sonos")
