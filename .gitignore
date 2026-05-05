@@ -4,6 +4,11 @@
 # OAuth refresh token cache — contains a long-lived credential, NEVER commit
 .spotify-cache
 
+# Local memory store (per-user listening events, feedback, notes)
+spot.db
+spot.db-shm
+spot.db-wal
+
 # Local env files
 .env
 .env.*
