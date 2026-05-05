@@ -168,6 +168,17 @@ type playlistMutateJSON struct {
 	Track    playlistTrackJSON `json:"track"`
 }
 
+// freshAlbumJSON is the JSON shape used by `spot fresh`. One row per album
+// with first-track-only TrackIDs by default; --all-tracks expands it.
+type freshAlbumJSON struct {
+	AlbumID     string   `json:"album_id"`
+	AlbumName   string   `json:"album"`
+	ArtistID    string   `json:"artist_id"`
+	ArtistName  string   `json:"artist"`
+	ReleaseDate string   `json:"release_date"`
+	TrackIDs    []string `json:"track_ids"`
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -906,6 +917,95 @@ filters that list to plays within the given Go duration (e.g. 24h, 168h).`,
 			})
 		},
 	})
+
+	var freshDays int
+	var freshZone string
+	var freshAll bool
+	freshCmd := &cobra.Command{
+		Use:   "fresh",
+		Short: "Recent releases from artists you follow",
+		Long: `Walk your followed artists, fetch each one's albums, and list those
+released within the last --days (default 30). Pass --zone to queue
+the results on a Sonos zone.
+
+By default each fresh album contributes only its first track to the
+output and (with --zone) to the queue. Pass --all-tracks to surface
+every track on each fresh album.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if freshDays <= 0 {
+				return fmt.Errorf("--days must be positive")
+			}
+			window := time.Duration(freshDays) * 24 * time.Hour
+			albums, err := spot.Fresh(cmd.Context(), window, 0)
+			if err != nil {
+				return err
+			}
+
+			// Optionally expand each album to its full track list.
+			if freshAll {
+				for i := range albums {
+					ids, err := spot.AlbumTrackIDs(cmd.Context(), albums[i].AlbumID)
+					if err == nil && len(ids) > 0 {
+						albums[i].TrackIDs = ids
+					}
+				}
+			}
+
+			out := make([]freshAlbumJSON, 0, len(albums))
+			for _, a := range albums {
+				ids := a.TrackIDs
+				if ids == nil {
+					ids = []string{}
+				}
+				out = append(out, freshAlbumJSON{
+					AlbumID:     a.AlbumID,
+					AlbumName:   a.AlbumName,
+					ArtistID:    a.ArtistID,
+					ArtistName:  a.ArtistName,
+					ReleaseDate: a.ReleaseDate.Format("2006-01-02"),
+					TrackIDs:    ids,
+				})
+			}
+
+			// If a zone was supplied, gather every TrackID in newest-first
+			// order and queue them on the zone before printing.
+			if freshZone != "" && len(albums) > 0 {
+				var queue []string
+				for _, a := range albums {
+					queue = append(queue, a.TrackIDs...)
+				}
+				if len(queue) > 0 {
+					if err := spot.PlayTrackIDsViaSonos(cmd.Context(), freshZone, queue); err != nil {
+						return err
+					}
+				}
+			}
+
+			return emit(out, func() error {
+				if len(out) == 0 {
+					fmt.Fprintf(os.Stderr, "no fresh releases from followed artists in the last %d days\n", freshDays)
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "RELEASED\tARTIST\tALBUM")
+				for _, a := range out {
+					fmt.Fprintf(tw, "%s\t%s\t%s\n", a.ReleaseDate, a.ArtistName, a.AlbumName)
+				}
+				if err := tw.Flush(); err != nil {
+					return err
+				}
+				if freshZone != "" {
+					fmt.Printf("queued %d album(s) on %s\n", len(out), freshZone)
+				}
+				return nil
+			})
+		},
+	}
+	freshCmd.Flags().IntVar(&freshDays, "days", 30, "lookback window in days")
+	freshCmd.Flags().StringVar(&freshZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
+	freshCmd.Flags().BoolVar(&freshAll, "all-tracks", false, "include all tracks per album (default: first track only)")
+	root.AddCommand(freshCmd)
 
 	// --- end personalization commands ---------------------------------
 
