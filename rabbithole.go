@@ -10,7 +10,7 @@ package spot
 // rooted at the seed but personalized to the listener.
 //
 // The library function returns both the chosen tracks and the per-artist
-// walk that produced them, so a future --explain flag can narrate why
+// walk that produced them, so the CLI's --explain flag can narrate why
 // each artist was picked. The default human CLI output prints just the
 // tracks; --json includes both fields.
 

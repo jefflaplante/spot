@@ -192,10 +192,29 @@ type mixTrackJSON struct {
 
 // mixResultJSON is the top-level JSON object for `spot mix`.
 type mixResultJSON struct {
-	Length int            `json:"length"`
-	Seed   string         `json:"seed,omitempty"`
-	Zone   string         `json:"zone,omitempty"`
-	Tracks []mixTrackJSON `json:"tracks"`
+	Length  int             `json:"length"`
+	Seed    string          `json:"seed,omitempty"`
+	Zone    string          `json:"zone,omitempty"`
+	Tracks  []mixTrackJSON  `json:"tracks"`
+	Explain *mixExplainJSON `json:"explain,omitempty"`
+}
+
+// mixExplainJSON mirrors spot.MixExplanation for the CLI's JSON shape;
+// emitted only when --explain is set.
+type mixExplainJSON struct {
+	SeedKind          string `json:"seed_kind"`
+	SeedTrackID       string `json:"seed_track_id,omitempty"`
+	SeedTrackTitle    string `json:"seed_track_title,omitempty"`
+	SeedTrackArtist   string `json:"seed_track_artist,omitempty"`
+	SeedArtistID      string `json:"seed_artist_id,omitempty"`
+	SeedArtistName    string `json:"seed_artist_name,omitempty"`
+	PoolSource        string `json:"pool_source"`
+	PoolSize          int    `json:"pool_size"`
+	DroppedHate       int    `json:"dropped_hate"`
+	DroppedRecent     int    `json:"dropped_recent"`
+	DroppedDup        int    `json:"dropped_dup"`
+	Final             int    `json:"final"`
+	ExcludeRecentDays int    `json:"exclude_recent_days"`
 }
 
 // dailyTrackJSON is the JSON shape used by `spot daily`. One row per
@@ -209,6 +228,24 @@ type dailyTrackJSON struct {
 	Album   string `json:"album,omitempty"`
 }
 
+// dailyResultJSON is the envelope `spot daily --json` emits when
+// --explain is set; without --explain the CLI emits a flat
+// []dailyTrackJSON for backward compatibility.
+type dailyResultJSON struct {
+	Tracks  []dailyTrackJSON  `json:"tracks"`
+	Explain *dailyExplainJSON `json:"explain,omitempty"`
+}
+
+// dailyExplainJSON mirrors spot.DailyExplanation.
+type dailyExplainJSON struct {
+	PoolSize         int `json:"pool_size"`
+	DroppedRecent    int `json:"dropped_recent"`
+	DroppedHate      int `json:"dropped_hate"`
+	Loved            int `json:"loved"`
+	RecentWindowDays int `json:"recent_window_days"`
+	Final            int `json:"final"`
+}
+
 // deeperTrackJSON is the JSON shape used by `spot deeper`. One row per
 // surfaced track, ordered oldest-album-first — the chronological walk
 // through an artist's discography minus their top-10 hits.
@@ -219,6 +256,27 @@ type deeperTrackJSON struct {
 	TrackID     string `json:"track_id"`
 	Title       string `json:"title"`
 	Artist      string `json:"artist"`
+}
+
+// deeperResultJSON is the envelope `spot deeper --json` emits when
+// --explain is set. Without --explain the CLI emits a flat
+// []deeperTrackJSON for backward compatibility.
+type deeperResultJSON struct {
+	Tracks  []deeperTrackJSON  `json:"tracks"`
+	Explain *deeperExplainJSON `json:"explain,omitempty"`
+}
+
+// deeperExplainJSON describes how Deeper picked its tracks. The CLI
+// builds this from the args + the returned tracks; the library doesn't
+// need a *WithExplain sibling for Deeper.
+type deeperExplainJSON struct {
+	Artist        string `json:"artist"`
+	PerAlbum      int    `json:"per_album"`
+	AlbumsWalked  int    `json:"albums_walked"`
+	TracksPicked  int    `json:"tracks_picked"`
+	SkipTopHits   int    `json:"skip_top_hits"` // always 10 — the artist's top-10 set
+	OldestRelease string `json:"oldest_release,omitempty"`
+	NewestRelease string `json:"newest_release,omitempty"`
 }
 
 // rabbitholeTrackJSON is one chosen track in `spot rabbithole --json`.
@@ -243,10 +301,38 @@ type rabbitholeStepJSON struct {
 // walk is included now so a future --explain flag can render the
 // reasoning without re-running the algorithm.
 type rabbitholeJSON struct {
-	Seed   string                `json:"seed,omitempty"`
-	Zone   string                `json:"zone,omitempty"`
-	Tracks []rabbitholeTrackJSON `json:"tracks"`
-	Walk   []rabbitholeStepJSON  `json:"walk"`
+	Seed    string                 `json:"seed,omitempty"`
+	Zone    string                 `json:"zone,omitempty"`
+	Tracks  []rabbitholeTrackJSON  `json:"tracks"`
+	Walk    []rabbitholeStepJSON   `json:"walk"`
+	Explain *rabbitholeExplainJSON `json:"explain,omitempty"`
+}
+
+// rabbitholeExplainJSON is a small explanation struct emitted only
+// when --explain is set. The walk is already part of the envelope, so
+// this just summarises top-level counts.
+type rabbitholeExplainJSON struct {
+	SeedArtist     string `json:"seed_artist"`
+	ArtistsWalked  int    `json:"artists_walked"`
+	TotalTracks    int    `json:"total_tracks"`
+	UsesGenreScore bool   `json:"uses_genre_score"`
+}
+
+// freshResultJSON is the envelope `spot fresh --json` emits when
+// --explain is set. Without --explain the CLI emits a flat
+// []freshAlbumJSON for backward compatibility.
+type freshResultJSON struct {
+	Albums  []freshAlbumJSON  `json:"albums"`
+	Explain *freshExplainJSON `json:"explain,omitempty"`
+}
+
+// freshExplainJSON mirrors spot.FreshExplanation.
+type freshExplainJSON struct {
+	FollowedArtists    int `json:"followed_artists"`
+	CutoffDays         int `json:"cutoff_days"`
+	AlbumsWithinWindow int `json:"albums_within_window"`
+	ArtistsWithFresh   int `json:"artists_with_fresh"`
+	Final              int `json:"final"`
 }
 
 func main() {
@@ -991,6 +1077,7 @@ filters that list to plays within the given Go duration (e.g. 24h, 168h).`,
 	var freshDays int
 	var freshZone string
 	var freshAll bool
+	var freshExplain bool
 	freshCmd := &cobra.Command{
 		Use:   "fresh",
 		Short: "Recent releases from artists you follow",
@@ -1007,7 +1094,7 @@ every track on each fresh album.`,
 				return fmt.Errorf("--days must be positive")
 			}
 			window := time.Duration(freshDays) * 24 * time.Hour
-			albums, err := spot.Fresh(cmd.Context(), window, 0)
+			albums, freshExp, err := spot.FreshWithExplain(cmd.Context(), window, 0)
 			if err != nil {
 				return err
 			}
@@ -1052,7 +1139,32 @@ every track on each fresh album.`,
 				}
 			}
 
-			return emit(out, func() error {
+			// --explain envelope: wrap in freshResultJSON so the
+			// reasoning sits next to the albums slice. Without --explain
+			// keep the historical flat-array shape.
+			var jsonPayload any = out
+			var explainJSON *freshExplainJSON
+			if freshExplain && freshExp != nil {
+				explainJSON = &freshExplainJSON{
+					FollowedArtists:    freshExp.FollowedArtists,
+					CutoffDays:         freshExp.CutoffDays,
+					AlbumsWithinWindow: freshExp.AlbumsWithinWindow,
+					ArtistsWithFresh:   freshExp.ArtistsWithFresh,
+					Final:              freshExp.Final,
+				}
+				jsonPayload = freshResultJSON{Albums: out, Explain: explainJSON}
+			}
+
+			return emit(jsonPayload, func() error {
+				if freshExplain && freshExp != nil {
+					fmt.Println("Why these picks (fresh):")
+					fmt.Printf("  followed artists walked: %d\n", freshExp.FollowedArtists)
+					fmt.Printf("  lookback window:         last %d days\n", freshExp.CutoffDays)
+					fmt.Printf("  albums within window:    %d (from %d artist(s))\n",
+						freshExp.AlbumsWithinWindow, freshExp.ArtistsWithFresh)
+					fmt.Printf("  kept:                    %d\n", freshExp.Final)
+					fmt.Println()
+				}
 				if len(out) == 0 {
 					fmt.Fprintf(os.Stderr, "no fresh releases from followed artists in the last %d days\n", freshDays)
 					return nil
@@ -1075,6 +1187,7 @@ every track on each fresh album.`,
 	freshCmd.Flags().IntVar(&freshDays, "days", 30, "lookback window in days")
 	freshCmd.Flags().StringVar(&freshZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
 	freshCmd.Flags().BoolVar(&freshAll, "all-tracks", false, "include all tracks per album (default: first track only)")
+	freshCmd.Flags().BoolVar(&freshExplain, "explain", false, "print the algorithmic reasoning before the album list")
 	root.AddCommand(freshCmd)
 
 	// --- mix command (bd-bqx) -----------------------------------------
@@ -1084,6 +1197,7 @@ every track on each fresh album.`,
 		mixSeed          string
 		mixZone          string
 		mixExcludeRecent int
+		mixExplain       bool
 	)
 	mixCmd := &cobra.Command{
 		Use:   "mix",
@@ -1108,7 +1222,7 @@ emitting it; omit --zone to just print the list.`,
 				Seed:          mixSeed,
 				ExcludeRecent: time.Duration(mixExcludeRecent) * 24 * time.Hour,
 			}
-			tracks, err := spot.Mix(cmd.Context(), opts)
+			tracks, mixExp, err := spot.MixWithExplain(cmd.Context(), opts)
 			if err != nil {
 				return err
 			}
@@ -1118,6 +1232,23 @@ emitting it; omit --zone to just print the list.`,
 				Seed:   mixSeed,
 				Zone:   mixZone,
 				Tracks: make([]mixTrackJSON, 0, len(tracks)),
+			}
+			if mixExplain && mixExp != nil {
+				out.Explain = &mixExplainJSON{
+					SeedKind:          mixExp.SeedKind,
+					SeedTrackID:       mixExp.SeedTrackID,
+					SeedTrackTitle:    mixExp.SeedTrackTitle,
+					SeedTrackArtist:   mixExp.SeedTrackArtist,
+					SeedArtistID:      mixExp.SeedArtistID,
+					SeedArtistName:    mixExp.SeedArtistName,
+					PoolSource:        mixExp.PoolSource,
+					PoolSize:          mixExp.PoolSize,
+					DroppedHate:       mixExp.DroppedHate,
+					DroppedRecent:     mixExp.DroppedRecent,
+					DroppedDup:        mixExp.DroppedDup,
+					Final:             mixExp.Final,
+					ExcludeRecentDays: mixExp.ExcludeRecentDays,
+				}
 			}
 			ids := make([]string, 0, len(tracks))
 			for i, t := range tracks {
@@ -1140,6 +1271,39 @@ emitting it; omit --zone to just print the list.`,
 			}
 
 			return emit(out, func() error {
+				if mixExplain && mixExp != nil {
+					fmt.Println("Why these picks:")
+					switch mixExp.SeedKind {
+					case "track":
+						fmt.Printf("  seed: spotify:track:%s (%s — %s)\n",
+							mixExp.SeedTrackID, mixExp.SeedTrackArtist, mixExp.SeedTrackTitle)
+					case "artist":
+						if mixExp.SeedArtistName != "" {
+							fmt.Printf("  seed: spotify:artist:%s (%s)\n", mixExp.SeedArtistID, mixExp.SeedArtistName)
+						} else {
+							fmt.Printf("  seed: spotify:artist:%s\n", mixExp.SeedArtistID)
+						}
+					default:
+						fmt.Println("  seed: (none — using your top medium_term tracks)")
+					}
+					fmt.Printf("  pool: %d candidates from %s\n", mixExp.PoolSize, mixExp.PoolSource)
+					filterParts := []string{}
+					if mixExp.DroppedHate > 0 {
+						filterParts = append(filterParts, fmt.Sprintf("-%d hate/skip-forever", mixExp.DroppedHate))
+					}
+					if mixExp.DroppedRecent > 0 {
+						filterParts = append(filterParts, fmt.Sprintf("-%d played in last %d day(s)", mixExp.DroppedRecent, mixExp.ExcludeRecentDays))
+					}
+					if mixExp.DroppedDup > 0 {
+						filterParts = append(filterParts, fmt.Sprintf("-%d duplicate", mixExp.DroppedDup))
+					}
+					if len(filterParts) == 0 {
+						fmt.Println("  filtered: (no tracks dropped)")
+					} else {
+						fmt.Printf("  filtered: %s\n", strings.Join(filterParts, ", "))
+					}
+					fmt.Printf("  kept: %d\n\n", mixExp.Final)
+				}
 				if len(tracks) == 0 {
 					fmt.Fprintln(os.Stderr, "no tracks in mix (try a different seed or shorter --exclude-recent)")
 					return nil
@@ -1163,12 +1327,14 @@ emitting it; omit --zone to just print the list.`,
 	mixCmd.Flags().StringVar(&mixSeed, "seed", "", "anchor mix to this track or artist (URI or query)")
 	mixCmd.Flags().StringVar(&mixZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
 	mixCmd.Flags().IntVar(&mixExcludeRecent, "exclude-recent", 7, "drop tracks played within the last N days (0 disables)")
+	mixCmd.Flags().BoolVar(&mixExplain, "explain", false, "print the algorithmic reasoning before the track list")
 	root.AddCommand(mixCmd)
 
 	// --- daily command (bd-wiz) ---------------------------------------
 
 	var dailyZone string
 	var dailyLength int
+	var dailyExplain bool
 	dailyCmd := &cobra.Command{
 		Use:   "daily",
 		Short: "Top long-term tracks minus what you've heard recently",
@@ -1183,7 +1349,7 @@ Pass --zone to queue the result on a Sonos zone via PlayTrackIDsViaSonos;
 omit to just print (or emit JSON with --json).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			tracks, err := spot.Daily(cmd.Context(), spot.DailyOptions{Length: dailyLength})
+			tracks, dailyExp, err := spot.DailyWithExplain(cmd.Context(), spot.DailyOptions{Length: dailyLength})
 			if err != nil {
 				return err
 			}
@@ -1212,7 +1378,45 @@ omit to just print (or emit JSON with --json).`,
 				}
 			}
 
-			return emit(out, func() error {
+			// --explain envelope: wrap the flat array so the reasoning
+			// sits next to it. Without --explain keep the historical
+			// flat-array shape.
+			var jsonPayload any = out
+			if dailyExplain && dailyExp != nil {
+				jsonPayload = dailyResultJSON{
+					Tracks: out,
+					Explain: &dailyExplainJSON{
+						PoolSize:         dailyExp.PoolSize,
+						DroppedRecent:    dailyExp.DroppedRecent,
+						DroppedHate:      dailyExp.DroppedHate,
+						Loved:            dailyExp.Loved,
+						RecentWindowDays: dailyExp.RecentWindowDays,
+						Final:            dailyExp.Final,
+					},
+				}
+			}
+
+			return emit(jsonPayload, func() error {
+				if dailyExplain && dailyExp != nil {
+					fmt.Println("Why these picks (daily):")
+					fmt.Printf("  pool: %d candidates from your top long_term tracks\n", dailyExp.PoolSize)
+					filterParts := []string{}
+					if dailyExp.DroppedRecent > 0 {
+						filterParts = append(filterParts, fmt.Sprintf("-%d played in last %d day(s)", dailyExp.DroppedRecent, dailyExp.RecentWindowDays))
+					}
+					if dailyExp.DroppedHate > 0 {
+						filterParts = append(filterParts, fmt.Sprintf("-%d hate/skip-forever", dailyExp.DroppedHate))
+					}
+					if len(filterParts) == 0 {
+						fmt.Println("  filtered: (no tracks dropped)")
+					} else {
+						fmt.Printf("  filtered: %s\n", strings.Join(filterParts, ", "))
+					}
+					if dailyExp.Loved > 0 {
+						fmt.Printf("  loved:    %d (boosted to the top)\n", dailyExp.Loved)
+					}
+					fmt.Printf("  kept:     %d\n\n", dailyExp.Final)
+				}
 				if len(out) == 0 {
 					fmt.Fprintln(os.Stderr, "no daily tracks (need top long-term tracks; try Spotify for a few weeks)")
 					return nil
@@ -1234,12 +1438,14 @@ omit to just print (or emit JSON with --json).`,
 	}
 	dailyCmd.Flags().StringVar(&dailyZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
 	dailyCmd.Flags().IntVar(&dailyLength, "length", 20, "max number of tracks to return")
+	dailyCmd.Flags().BoolVar(&dailyExplain, "explain", false, "print the algorithmic reasoning before the track list")
 	root.AddCommand(dailyCmd)
 
 	// --- deeper command (bd-1ky) --------------------------------------
 
 	var deeperZone string
 	var deeperPerAlbum int
+	var deeperExplain bool
 	deeperCmd := &cobra.Command{
 		Use:   "deeper <artist>",
 		Short: "Surface deep cuts: an artist's albums minus their top 10 tracks",
@@ -1253,6 +1459,10 @@ compilations, and appears-on records are filtered out.
 on the named Sonos zone via UPnP.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			perAlbum := deeperPerAlbum
+			if perAlbum <= 0 {
+				perAlbum = 1
+			}
 			tracks, err := spot.Deeper(cmd.Context(), args[0], spot.DeeperOptions{PerAlbum: deeperPerAlbum})
 			if err != nil {
 				return err
@@ -1277,7 +1487,54 @@ on the named Sonos zone via UPnP.`,
 					return err
 				}
 			}
-			return emit(out, func() error {
+
+			// Path B: build the explanation from the CLI args + the
+			// returned tracks. The library doesn't need a *WithExplain
+			// sibling for Deeper because everything we want to surface
+			// is already visible here.
+			var explainJSON *deeperExplainJSON
+			if deeperExplain {
+				artistName := args[0]
+				if len(tracks) > 0 && tracks[0].Artist != "" {
+					artistName = tracks[0].Artist
+				}
+				albumsSeen := make(map[string]struct{}, len(tracks))
+				for _, t := range tracks {
+					if t.AlbumID != "" {
+						albumsSeen[t.AlbumID] = struct{}{}
+					}
+				}
+				ej := &deeperExplainJSON{
+					Artist:       artistName,
+					PerAlbum:     perAlbum,
+					AlbumsWalked: len(albumsSeen),
+					TracksPicked: len(tracks),
+					SkipTopHits:  10,
+				}
+				if len(tracks) > 0 {
+					ej.OldestRelease = tracks[0].ReleaseDate.Format("2006-01-02")
+					ej.NewestRelease = tracks[len(tracks)-1].ReleaseDate.Format("2006-01-02")
+				}
+				explainJSON = ej
+			}
+
+			var jsonPayload any = out
+			if explainJSON != nil {
+				jsonPayload = deeperResultJSON{Tracks: out, Explain: explainJSON}
+			}
+
+			return emit(jsonPayload, func() error {
+				if explainJSON != nil {
+					fmt.Println("Why these picks (deeper):")
+					fmt.Printf("  artist:        %s\n", explainJSON.Artist)
+					fmt.Printf("  catalog:       %d album(s) walked, oldest-first\n", explainJSON.AlbumsWalked)
+					fmt.Printf("  per album:     up to %d track(s)\n", explainJSON.PerAlbum)
+					fmt.Printf("  skipped:       artist's top %d (greatest hits), singles, comps, appears-on\n", explainJSON.SkipTopHits)
+					if explainJSON.OldestRelease != "" && explainJSON.NewestRelease != "" {
+						fmt.Printf("  date range:    %s -> %s\n", explainJSON.OldestRelease, explainJSON.NewestRelease)
+					}
+					fmt.Printf("  kept:          %d track(s)\n\n", explainJSON.TracksPicked)
+				}
 				if len(out) == 0 {
 					fmt.Fprintln(os.Stderr, "no deeper tracks found")
 					return nil
@@ -1299,14 +1556,16 @@ on the named Sonos zone via UPnP.`,
 	}
 	deeperCmd.Flags().StringVar(&deeperZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
 	deeperCmd.Flags().IntVar(&deeperPerAlbum, "per-album", 1, "tracks to surface per album (1 or 2 keeps the queue tight)")
+	deeperCmd.Flags().BoolVar(&deeperExplain, "explain", false, "print the algorithmic reasoning before the track list")
 	root.AddCommand(deeperCmd)
 
 	// --- rabbithole command (bd-1aw) ----------------------------------
 
 	var (
-		rabbitSeed   string
-		rabbitLength int
-		rabbitZone   string
+		rabbitSeed    string
+		rabbitLength  int
+		rabbitZone    string
+		rabbitExplain bool
 	)
 	rabbitCmd := &cobra.Command{
 		Use:   "rabbithole",
@@ -1320,8 +1579,8 @@ top tracks from each. Returns roughly --length tracks (default 20).
 Pass --zone to queue the result on a Sonos zone instead of just printing.
 
 The JSON output also includes the artist-by-artist walk that produced
-the track list, so a future --explain flag can show why each artist
-was picked.`,
+the track list. Pass --explain to render the walk in human mode before
+the track list.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			tracks, walk, err := spot.Rabbithole(cmd.Context(), spot.RabbitholeOptions{
@@ -1370,7 +1629,46 @@ was picked.`,
 				Tracks: outTracks,
 				Walk:   outWalk,
 			}
+
+			// Path B: rabbithole already returns the walk, so we render
+			// it directly in the CLI without a *WithExplain sibling. The
+			// seed step is the first walk entry by construction.
+			var seedArtist string
+			if len(walk) > 0 {
+				seedArtist = walk[0].ArtistName
+			}
+			if rabbitExplain {
+				env.Explain = &rabbitholeExplainJSON{
+					SeedArtist:     seedArtist,
+					ArtistsWalked:  len(walk),
+					TotalTracks:    len(tracks),
+					UsesGenreScore: true,
+				}
+			}
+
 			return emit(env, func() error {
+				if rabbitExplain && len(walk) > 0 {
+					fmt.Println("Why these picks (rabbithole):")
+					seed := walk[0]
+					if seed.GenreOverlap > 0 {
+						fmt.Printf("  seed: %s (genre signature: %d tag(s)) -> %d track(s)\n",
+							seed.ArtistName, seed.GenreOverlap, len(seed.TrackIDs))
+					} else {
+						fmt.Printf("  seed: %s -> %d track(s)\n", seed.ArtistName, len(seed.TrackIDs))
+					}
+					if len(walk) > 1 {
+						fmt.Println("  artists chosen by genre overlap with the seed:")
+						tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+						for _, s := range walk[1:] {
+							fmt.Fprintf(tw, "    %s\toverlap=%d\t-> %d track(s)\n",
+								s.ArtistName, s.GenreOverlap, len(s.TrackIDs))
+						}
+						if err := tw.Flush(); err != nil {
+							return err
+						}
+					}
+					fmt.Println()
+				}
 				if len(tracks) == 0 {
 					fmt.Fprintln(os.Stderr, "rabbithole: no tracks (try a --seed with at least one genre that overlaps your top artists)")
 					return nil
@@ -1392,6 +1690,7 @@ was picked.`,
 	rabbitCmd.Flags().StringVar(&rabbitSeed, "seed", "", "seed artist (free-text query or spotify:artist:<id>); default: your top short-term artist")
 	rabbitCmd.Flags().IntVar(&rabbitLength, "length", 20, "max number of tracks to return")
 	rabbitCmd.Flags().StringVar(&rabbitZone, "zone", "", "queue the result on this Sonos zone (omit to just print)")
+	rabbitCmd.Flags().BoolVar(&rabbitExplain, "explain", false, "print the artist walk before the track list")
 	root.AddCommand(rabbitCmd)
 
 	// --- end personalization commands ---------------------------------

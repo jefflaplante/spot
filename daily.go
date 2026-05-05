@@ -32,6 +32,35 @@ type DailyOptions struct {
 	Length int
 }
 
+// DailyExplanation captures the algorithmic reasoning behind a Daily
+// call so the CLI's --explain flag can describe how the list was built:
+// pool size from /me/top/tracks long_term, drops from recent plays and
+// hate verdicts, and the love-boost count.
+type DailyExplanation struct {
+	// PoolSize is the unfiltered top-long-term candidate count
+	// (Spotify-side max ~50).
+	PoolSize int
+
+	// DroppedRecent is the number of candidates dropped because they
+	// appeared in the last 30 days of recently-played history.
+	DroppedRecent int
+
+	// DroppedHate is the number of candidates dropped because the user
+	// had a hate / skip-forever feedback verdict on them.
+	DroppedHate int
+
+	// Loved is the number of candidates that received the love boost
+	// (floated to the top of the result list).
+	Loved int
+
+	// RecentWindowDays is the recently-played lookback window in days.
+	RecentWindowDays int
+
+	// Final is the number of tracks returned after filtering and
+	// truncation to opts.Length.
+	Final int
+}
+
 const (
 	dailyDefaultLength = 20
 	dailyTopFetch      = 50 // Spotify-side max for /me/top/tracks.
@@ -48,6 +77,13 @@ const (
 // played in the last 30 days, with love/hate feedback applied as filter
 // (hate/skip-forever) and boost (love).
 func Daily(ctx context.Context, opts DailyOptions) ([]*trackInfo, error) {
+	tracks, _, err := DailyWithExplain(ctx, opts)
+	return tracks, err
+}
+
+// DailyWithExplain is Daily plus an explanation describing the
+// candidate pool and per-filter drop counts.
+func DailyWithExplain(ctx context.Context, opts DailyOptions) ([]*trackInfo, *DailyExplanation, error) {
 	length := opts.Length
 	if length <= 0 {
 		length = dailyDefaultLength
@@ -55,15 +91,19 @@ func Daily(ctx context.Context, opts DailyOptions) ([]*trackInfo, error) {
 
 	tops, err := TopTracks(ctx, TopLong, dailyTopFetch)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	exp := &DailyExplanation{
+		PoolSize:         len(tops),
+		RecentWindowDays: int(dailyRecentWindow / (24 * time.Hour)),
 	}
 	if len(tops) == 0 {
-		return nil, nil
+		return nil, exp, nil
 	}
 
 	recent, err := RecentlyPlayed(ctx, dailyRecentWindow, dailyRecentFetch)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	recentSet := make(map[string]struct{}, len(recent))
 	for _, it := range recent {
@@ -86,7 +126,7 @@ func Daily(ctx context.Context, opts DailyOptions) ([]*trackInfo, error) {
 	}
 	verdicts, err := dailyFeedbackVerdicts(ctx, candidateIDs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	type scored struct {
@@ -101,16 +141,19 @@ func Daily(ctx context.Context, opts DailyOptions) ([]*trackInfo, error) {
 			continue
 		}
 		if _, played := recentSet[id]; played {
+			exp.DroppedRecent++
 			continue
 		}
 		switch verdicts[id] {
 		case "hate", "skip-forever":
+			exp.DroppedHate++
 			continue
 		}
 		info := makeTrackInfo(&t)
 		boost := 0
 		if verdicts[id] == "love" {
 			boost = dailyLoveWeight
+			exp.Loved++
 		}
 		pool = append(pool, scored{info: info, rank: i, boost: boost})
 	}
@@ -130,7 +173,8 @@ func Daily(ctx context.Context, opts DailyOptions) ([]*trackInfo, error) {
 	for _, s := range pool {
 		out = append(out, s.info)
 	}
-	return out, nil
+	exp.Final = len(out)
+	return out, exp, nil
 }
 
 // dailyFeedbackVerdicts returns the most recent love/hate/skip-forever

@@ -16,6 +16,32 @@ import (
 	sp "github.com/zmb3/spotify/v2"
 )
 
+// FreshExplanation captures the algorithmic reasoning behind a Fresh
+// call: how many followed artists were walked, how many albums survived
+// the release-date cutoff, and what the lookback window was. The CLI's
+// --explain flag uses this to describe the crawl that produced the
+// listed albums.
+type FreshExplanation struct {
+	// FollowedArtists is the size of the user's followed-artist set
+	// that drove the walk.
+	FollowedArtists int
+
+	// CutoffDays is the lookback window in days (since arg / 24h).
+	CutoffDays int
+
+	// AlbumsWithinWindow is the number of distinct albums whose
+	// release_date fell inside the cutoff window across all walked
+	// artists, before the limit was applied.
+	AlbumsWithinWindow int
+
+	// ArtistsWithFresh is the number of followed artists that
+	// contributed at least one album within the window.
+	ArtistsWithFresh int
+
+	// Final is the number of albums returned after the limit cap.
+	Final int
+}
+
 // FreshAlbum is one recently-released album from a followed artist. The
 // TrackIDs slice carries the Spotify track IDs to surface for the album:
 // by default just the first track on the album, but callers can opt into
@@ -68,18 +94,30 @@ func parseReleaseDate(date, precision string) time.Time {
 // enough for a "what's new" surface; expand from there with GetAlbum if
 // needed. Walks the followed-artist list with bounded concurrency.
 func Fresh(ctx context.Context, since time.Duration, limit int) ([]FreshAlbum, error) {
+	albums, _, err := FreshWithExplain(ctx, since, limit)
+	return albums, err
+}
+
+// FreshWithExplain is Fresh plus an explanation describing the
+// followed-artist crawl: number of artists walked, lookback window,
+// and how many albums survived the release-date cutoff.
+func FreshWithExplain(ctx context.Context, since time.Duration, limit int) ([]FreshAlbum, *FreshExplanation, error) {
 	c, err := getClient(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	artists, err := FollowedArtists(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if since <= 0 {
 		since = 30 * 24 * time.Hour
 	}
 	cutoff := time.Now().Add(-since)
+	exp := &FreshExplanation{
+		FollowedArtists: len(artists),
+		CutoffDays:      int(since / (24 * time.Hour)),
+	}
 
 	// Fan out: workers consume artist IDs from `jobs`, push FreshAlbum
 	// candidates to `out`. We collect into a slice under a mutex rather
@@ -152,11 +190,23 @@ func Fresh(ctx context.Context, since time.Duration, limit int) ([]FreshAlbum, e
 	wg.Wait()
 
 	if firstErr != nil {
-		return nil, firstErr
+		return nil, nil, firstErr
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	// Walk metrics: total albums within window + distinct artists who
+	// contributed. Recorded before the limit truncation so the
+	// explanation reflects the algorithm's full reach.
+	exp.AlbumsWithinWindow = len(all)
+	contributing := make(map[string]struct{}, len(all))
+	for _, a := range all {
+		if a.ArtistID != "" {
+			contributing[a.ArtistID] = struct{}{}
+		}
+	}
+	exp.ArtistsWithFresh = len(contributing)
 
 	// Newest-first.
 	sort.Slice(all, func(i, j int) bool {
@@ -165,6 +215,7 @@ func Fresh(ctx context.Context, since time.Duration, limit int) ([]FreshAlbum, e
 	if limit > 0 && len(all) > limit {
 		all = all[:limit]
 	}
+	exp.Final = len(all)
 
 	// Populate TrackIDs with the album's first track. Best-effort per
 	// album: a single failure shouldn't kill the whole surface.
@@ -188,7 +239,7 @@ func Fresh(ctx context.Context, since time.Duration, limit int) ([]FreshAlbum, e
 		all[i].TrackIDs = ids
 	}
 
-	return all, nil
+	return all, exp, nil
 }
 
 // AlbumTrackIDs returns every track ID on the given album, in album
