@@ -75,6 +75,60 @@ type queueRawJSON struct {
 	XML  string `json:"xml"`
 }
 
+// --- personalization JSON shapes (top, recent, liked, follows, playlists) ---
+
+// topTrackJSON is the JSON shape used by `spot top tracks`.
+type topTrackJSON struct {
+	Rank       int    `json:"rank"`
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Artist     string `json:"artist"`
+	Popularity int    `json:"popularity"`
+}
+
+// topArtistJSON is the JSON shape used by `spot top artists`.
+type topArtistJSON struct {
+	Rank       int      `json:"rank"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Popularity int      `json:"popularity"`
+	Genres     []string `json:"genres"`
+}
+
+// recentTrackJSON is the JSON shape used by `spot recent`.
+type recentTrackJSON struct {
+	PlayedAt string `json:"played_at"`
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Artist   string `json:"artist"`
+}
+
+// likedTrackJSON is the JSON shape used by `spot liked`.
+type likedTrackJSON struct {
+	AddedAt string `json:"added_at"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Artist  string `json:"artist"`
+}
+
+// followedArtistJSON is the JSON shape used by `spot follows`.
+type followedArtistJSON struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Popularity int      `json:"popularity"`
+	Genres     []string `json:"genres"`
+}
+
+// playlistJSON is the JSON shape used by `spot playlists`.
+type playlistJSON struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Owner  string `json:"owner"`
+	Tracks int    `json:"tracks"`
+	Public bool   `json:"public"`
+}
+
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -525,6 +579,296 @@ spot will use when playing on this zone.`,
 			})
 		},
 	})
+
+	// --- personalization commands -------------------------------------
+	// `spot top tracks|artists`, `spot recent`, `spot liked`, `spot follows`,
+	// `spot playlists`. All read-only. Each uses the matching library
+	// function in personalization.go and routes through emit() so --json
+	// works. Self-contained block to keep merges with parallel work clean.
+
+	// `spot top` is a parent with two subcommands.
+	topCmd := &cobra.Command{
+		Use:   "top",
+		Short: "Show the current user's top tracks or artists",
+		Args:  cobra.NoArgs,
+	}
+
+	// parseTopRange maps a positional arg ("", "short", "medium", "long")
+	// to the spot.TopRange value the library expects. Default is medium.
+	parseTopRange := func(args []string) (spot.TopRange, error) {
+		if len(args) == 0 {
+			return spot.TopMedium, nil
+		}
+		switch args[0] {
+		case "short":
+			return spot.TopShort, nil
+		case "medium":
+			return spot.TopMedium, nil
+		case "long":
+			return spot.TopLong, nil
+		default:
+			return "", fmt.Errorf("invalid time range %q (want short|medium|long)", args[0])
+		}
+	}
+
+	var topTracksLimit int
+	topTracksCmd := &cobra.Command{
+		Use:   "tracks [short|medium|long]",
+		Short: "List the user's top tracks for a time range (default medium)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, err := parseTopRange(args)
+			if err != nil {
+				return err
+			}
+			tracks, err := spot.TopTracks(cmd.Context(), r, topTracksLimit)
+			if err != nil {
+				return err
+			}
+			out := make([]topTrackJSON, 0, len(tracks))
+			for i, t := range tracks {
+				artistNames := make([]string, len(t.Artists))
+				for j, a := range t.Artists {
+					artistNames[j] = a.Name
+				}
+				out = append(out, topTrackJSON{
+					Rank:       i + 1,
+					ID:         string(t.ID),
+					Title:      t.Name,
+					Artist:     strings.Join(artistNames, ", "),
+					Popularity: int(t.Popularity),
+				})
+			}
+			return emit(out, func() error {
+				if len(out) == 0 {
+					fmt.Fprintln(os.Stderr, "no top tracks returned")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "RANK\tARTIST\tTITLE\tPOP")
+				for _, t := range out {
+					fmt.Fprintf(tw, "%d\t%s\t%s\t%d\n", t.Rank, t.Artist, t.Title, t.Popularity)
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	topTracksCmd.Flags().IntVar(&topTracksLimit, "limit", 20, "number of tracks to return (max 50)")
+	topCmd.AddCommand(topTracksCmd)
+
+	var topArtistsLimit int
+	topArtistsCmd := &cobra.Command{
+		Use:   "artists [short|medium|long]",
+		Short: "List the user's top artists for a time range (default medium)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			r, err := parseTopRange(args)
+			if err != nil {
+				return err
+			}
+			artists, err := spot.TopArtists(cmd.Context(), r, topArtistsLimit)
+			if err != nil {
+				return err
+			}
+			out := make([]topArtistJSON, 0, len(artists))
+			for i, a := range artists {
+				genres := a.Genres
+				if genres == nil {
+					genres = []string{}
+				}
+				out = append(out, topArtistJSON{
+					Rank:       i + 1,
+					ID:         string(a.ID),
+					Name:       a.Name,
+					Popularity: int(a.Popularity),
+					Genres:     genres,
+				})
+			}
+			return emit(out, func() error {
+				if len(out) == 0 {
+					fmt.Fprintln(os.Stderr, "no top artists returned")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "RANK\tNAME\tPOP\tGENRES")
+				for _, a := range out {
+					fmt.Fprintf(tw, "%d\t%s\t%d\t%s\n", a.Rank, a.Name, a.Popularity, strings.Join(a.Genres, ", "))
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	topArtistsCmd.Flags().IntVar(&topArtistsLimit, "limit", 20, "number of artists to return (max 50)")
+	topCmd.AddCommand(topArtistsCmd)
+
+	root.AddCommand(topCmd)
+
+	var recentSince string
+	var recentLimit int
+	recentCmd := &cobra.Command{
+		Use:   "recent",
+		Short: "List recently played tracks (last 50, optionally filtered by --since)",
+		Long: `List recently-played tracks. Spotify only remembers the last fifty
+plays — there is no way to fetch more from the Web API. --since further
+filters that list to plays within the given Go duration (e.g. 24h, 168h).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var since time.Duration
+			if recentSince != "" {
+				d, err := time.ParseDuration(recentSince)
+				if err != nil {
+					return fmt.Errorf("--since %q: %w", recentSince, err)
+				}
+				since = d
+			}
+			items, err := spot.RecentlyPlayed(cmd.Context(), since, recentLimit)
+			if err != nil {
+				return err
+			}
+			out := make([]recentTrackJSON, 0, len(items))
+			for _, it := range items {
+				artistNames := make([]string, len(it.Track.Artists))
+				for j, a := range it.Track.Artists {
+					artistNames[j] = a.Name
+				}
+				out = append(out, recentTrackJSON{
+					PlayedAt: it.PlayedAt.UTC().Format(time.RFC3339),
+					ID:       string(it.Track.ID),
+					Title:    it.Track.Name,
+					Artist:   strings.Join(artistNames, ", "),
+				})
+			}
+			return emit(out, func() error {
+				if len(out) == 0 {
+					fmt.Fprintln(os.Stderr, "no recently-played tracks")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "WHEN\tARTIST\tTITLE")
+				for _, r := range out {
+					// human format trims to a compact RFC3339-ish stamp.
+					fmt.Fprintf(tw, "%s\t%s\t%s\n", r.PlayedAt, r.Artist, r.Title)
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	recentCmd.Flags().StringVar(&recentSince, "since", "", "filter to plays within this Go duration (e.g. 24h, 168h)")
+	recentCmd.Flags().IntVar(&recentLimit, "limit", 50, "max items to fetch from Spotify before --since filtering (max 50)")
+	root.AddCommand(recentCmd)
+
+	var likedLimit int
+	likedCmd := &cobra.Command{
+		Use:   "liked",
+		Short: "List the user's saved (liked) tracks, paginated transparently",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			tracks, err := spot.LikedTracks(cmd.Context(), likedLimit)
+			if err != nil {
+				return err
+			}
+			out := make([]likedTrackJSON, 0, len(tracks))
+			for _, t := range tracks {
+				artistNames := make([]string, len(t.Artists))
+				for j, a := range t.Artists {
+					artistNames[j] = a.Name
+				}
+				out = append(out, likedTrackJSON{
+					AddedAt: t.AddedAt,
+					ID:      string(t.ID),
+					Title:   t.Name,
+					Artist:  strings.Join(artistNames, ", "),
+				})
+			}
+			return emit(out, func() error {
+				if len(out) == 0 {
+					fmt.Fprintln(os.Stderr, "no liked tracks")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "ADDED\tARTIST\tTITLE")
+				for _, t := range out {
+					fmt.Fprintf(tw, "%s\t%s\t%s\n", t.AddedAt, t.Artist, t.Title)
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	likedCmd.Flags().IntVar(&likedLimit, "limit", 50, "max tracks to return (paginates as needed)")
+	root.AddCommand(likedCmd)
+
+	root.AddCommand(&cobra.Command{
+		Use:   "follows",
+		Short: "List artists the current user follows (all pages)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			artists, err := spot.FollowedArtists(cmd.Context())
+			if err != nil {
+				return err
+			}
+			out := make([]followedArtistJSON, 0, len(artists))
+			for _, a := range artists {
+				genres := a.Genres
+				if genres == nil {
+					genres = []string{}
+				}
+				out = append(out, followedArtistJSON{
+					ID:         string(a.ID),
+					Name:       a.Name,
+					Popularity: int(a.Popularity),
+					Genres:     genres,
+				})
+			}
+			return emit(out, func() error {
+				if len(out) == 0 {
+					fmt.Fprintln(os.Stderr, "not following any artists")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "NAME\tPOP\tGENRES")
+				for _, a := range out {
+					fmt.Fprintf(tw, "%s\t%d\t%s\n", a.Name, a.Popularity, strings.Join(a.Genres, ", "))
+				}
+				return tw.Flush()
+			})
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "playlists",
+		Short: "List playlists owned or followed by the current user (all pages)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			pls, err := spot.MyPlaylists(cmd.Context())
+			if err != nil {
+				return err
+			}
+			out := make([]playlistJSON, 0, len(pls))
+			for _, p := range pls {
+				out = append(out, playlistJSON{
+					ID:     string(p.ID),
+					Name:   p.Name,
+					Owner:  p.Owner.DisplayName,
+					Tracks: int(p.Tracks.Total),
+					Public: p.IsPublic,
+				})
+			}
+			return emit(out, func() error {
+				if len(out) == 0 {
+					fmt.Fprintln(os.Stderr, "no playlists")
+					return nil
+				}
+				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+				fmt.Fprintln(tw, "NAME\tOWNER\tTRACKS\tPUBLIC")
+				for _, p := range out {
+					fmt.Fprintf(tw, "%s\t%s\t%d\t%t\n", p.Name, p.Owner, p.Tracks, p.Public)
+				}
+				return tw.Flush()
+			})
+		},
+	})
+
+	// --- end personalization commands ---------------------------------
 
 	var via string
 	var continuePlay bool
