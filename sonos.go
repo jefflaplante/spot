@@ -544,19 +544,42 @@ func NowPlaying(ctx context.Context, room string) (*Playback, error) {
 		}
 	}
 
-	// Sonos doesn't preserve DIDL metadata for SMAPI queue items, so the
-	// currently-playing track from the queue often has an empty title.
-	// Look it up via the Spotify Web API. Best-effort.
-	if p.Title == "" {
-		if id := extractSpotifyTrackID(p.URI); id != "" {
-			if enriched, err := lookupSpotifyTracks(ctx, []string{id}); err == nil {
-				if info, ok := enriched[id]; ok {
-					p.Title = info.Title
-					p.Artist = info.Artist
-					p.Album = info.Album
-				}
+	// Resolve the Spotify track ID once — it drives both metadata
+	// enrichment (when Sonos's DIDL is empty for SMAPI items) and the
+	// queue-advance detection below.
+	trackID := extractSpotifyTrackID(p.URI)
+
+	// Best-effort: look up artist/title/album. Prefer the local cache
+	// (free) and fall back to the Spotify Web API on miss.
+	var info *trackInfo
+	if trackID != "" {
+		if cached, err := LookupTrack(ctx, trackID); err == nil && cached != nil {
+			info = cached
+		} else if enriched, err := lookupSpotifyTracks(ctx, []string{trackID}); err == nil {
+			if x, ok := enriched[trackID]; ok {
+				info = x
+				_ = CacheTrack(ctx, info, -1) // populate cache for future advances
 			}
 		}
+	}
+	if p.Title == "" && info != nil {
+		p.Title = info.Title
+		p.Artist = info.Artist
+		p.Album = info.Album
+	}
+
+	// If the queue has advanced since the last event we recorded for
+	// this zone, synthesize a play_started row (source="queue-advance")
+	// so spot history / spot stats see auto-advanced tracks. Without
+	// this, only the seed track of `play -c` ever lands in the events
+	// table — Sonos drives queue progression on its own and our process
+	// is long gone.
+	if p.State == "PLAYING" && trackID != "" {
+		artistID := ""
+		if info != nil {
+			artistID = info.ArtistID
+		}
+		logQueueAdvance(ctx, name, trackID, artistID)
 	}
 
 	// Best-effort observe event for the local-memory layer. Never fails

@@ -94,3 +94,70 @@ func TestMarshalPayloadShapes(t *testing.T) {
 		t.Errorf("marshalPayload(nil): want Valid=false, got %+v", got)
 	}
 }
+
+// TestLogQueueAdvanceWritesOnTransition verifies the queue-advance
+// detection used by NowPlaying. Captures the bug fix: tracks 2..N of a
+// queue weren't landing in the events table because Sonos drives queue
+// progression on its own. Now, when `spot now` observes a different
+// track than the most-recent recorded one for the same zone, a
+// play_started row gets synthesized.
+func TestLogQueueAdvanceWritesOnTransition(t *testing.T) {
+	setupTempDB(t)
+
+	ctx := context.Background()
+	db, err := getDB(ctx)
+	if err != nil {
+		t.Fatalf("getDB: %v", err)
+	}
+
+	// Simulate the seed track of a `play -c` invocation.
+	logEvent(ctx, EventRow{
+		Kind:     "play_started",
+		TrackID:  sql.NullString{String: "track-A", Valid: true},
+		ArtistID: sql.NullString{String: "artist-1", Valid: true},
+		Zone:     sql.NullString{String: "Parlor", Valid: true},
+		Source:   sql.NullString{String: "play", Valid: true},
+		Payload:  marshalPayload(map[string]any{"continuation": true, "queue_size": 10}),
+	})
+
+	// Same track observed → no advance row.
+	if logQueueAdvance(ctx, "Parlor", "track-A", "artist-1") {
+		t.Errorf("logQueueAdvance: wrote a row when track hadn't changed")
+	}
+
+	// Different track observed → advance row written.
+	if !logQueueAdvance(ctx, "Parlor", "track-B", "artist-1") {
+		t.Errorf("logQueueAdvance: didn't write a row for a track transition")
+	}
+
+	// Verify the row landed with the expected fields.
+	var (
+		kind, trackID, source sql.NullString
+	)
+	err = db.QueryRowContext(ctx,
+		`SELECT kind, track_id, source FROM events
+		 ORDER BY id DESC LIMIT 1`,
+	).Scan(&kind, &trackID, &source)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if kind.String != "play_started" {
+		t.Errorf("kind: got %q want play_started", kind.String)
+	}
+	if trackID.String != "track-B" {
+		t.Errorf("track_id: got %q want track-B", trackID.String)
+	}
+	if source.String != "queue-advance" {
+		t.Errorf("source: got %q want queue-advance", source.String)
+	}
+
+	// Re-observing track-B → no duplicate row.
+	if logQueueAdvance(ctx, "Parlor", "track-B", "artist-1") {
+		t.Errorf("logQueueAdvance: wrote a duplicate row for the same track")
+	}
+
+	// Different zone, same track → still considered a transition for THAT zone.
+	if !logQueueAdvance(ctx, "Kitchen", "track-B", "artist-1") {
+		t.Errorf("logQueueAdvance: should write on first observation in a new zone")
+	}
+}
