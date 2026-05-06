@@ -267,8 +267,19 @@ func makeTrackInfo(t *sp.FullTrack) *trackInfo {
 	return info
 }
 
-// resolveTrack searches Spotify for `query` (or accepts a "spotify:track:..."
-// URI directly) and returns the track plus enough metadata for Sonos DIDL.
+// resolveTrack searches Spotify for `query` and returns the track plus
+// enough metadata for Sonos DIDL.
+//
+// Resolution order:
+//  1. spotify:track:<id> — direct GetTrack.
+//  2. spotify:artist:<id> — top track of that artist becomes the seed.
+//  3. Free text whose normalized form equals a top artist-search hit:
+//     resolved as that artist's #1 top track. This is the fix for the
+//     "play nine inch nails" → Linkin Park bug — track-search top hits
+//     for bare artist names can be covers, remixes, or unrelated tracks
+//     whose metadata happens to mention the artist. Artist search is
+//     reliable when the query unambiguously names an artist.
+//  4. Otherwise, track search (the original behavior).
 func resolveTrack(ctx context.Context, query string) (*trackInfo, error) {
 	c, err := getClient(ctx)
 	if err != nil {
@@ -282,9 +293,21 @@ func resolveTrack(ctx context.Context, query string) (*trackInfo, error) {
 		}
 		return makeTrackInfo(t), nil
 	}
-	if strings.HasPrefix(query, "spotify:") {
-		return nil, fmt.Errorf("only spotify:track:... URIs supported (got %q)", query)
+	if strings.HasPrefix(query, "spotify:artist:") {
+		id := strings.TrimPrefix(query, "spotify:artist:")
+		return artistTopAsSeed(ctx, id)
 	}
+	if strings.HasPrefix(query, "spotify:") {
+		return nil, fmt.Errorf("only spotify:track:... or spotify:artist:... URIs supported (got %q)", query)
+	}
+
+	// Try artist resolution first. Conservative: only switches modes
+	// when the query, normalized, exactly equals a top artist-search
+	// result's name. Anything ambiguous falls through to track search.
+	if info, ok := tryArtistResolution(ctx, query); ok {
+		return info, nil
+	}
+
 	res, err := c.Search(ctx, query, sp.SearchTypeTrack, sp.Limit(1))
 	if err != nil {
 		return nil, fmt.Errorf("search %q: %w", query, err)
@@ -294,6 +317,62 @@ func resolveTrack(ctx context.Context, query string) (*trackInfo, error) {
 	}
 	t := res.Tracks.Tracks[0]
 	return makeTrackInfo(&t), nil
+}
+
+// artistTopAsSeed fetches the artist's #1 top track and returns it as a
+// trackInfo. Used when the query is a spotify:artist: URI or a bare
+// artist name that matched via tryArtistResolution.
+func artistTopAsSeed(ctx context.Context, artistID string) (*trackInfo, error) {
+	c, err := getClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tops, err := c.GetArtistsTopTracks(ctx, sp.ID(artistID), "US")
+	if err != nil {
+		return nil, fmt.Errorf("artist top tracks: %w", err)
+	}
+	if len(tops) == 0 {
+		return nil, fmt.Errorf("artist %s has no top tracks (try a track or album query)", artistID)
+	}
+	return makeTrackInfo(&tops[0]), nil
+}
+
+// tryArtistResolution checks whether `query` unambiguously names a
+// Spotify artist; if so, returns that artist's #1 top track as the seed.
+// Returns (nil, false) for ambiguous queries — caller should fall back
+// to track search.
+func tryArtistResolution(ctx context.Context, query string) (*trackInfo, bool) {
+	c, err := getClient(ctx)
+	if err != nil {
+		return nil, false
+	}
+	res, err := c.Search(ctx, query, sp.SearchTypeArtist, sp.Limit(3))
+	if err != nil || res.Artists == nil {
+		return nil, false
+	}
+	for _, a := range res.Artists.Artists {
+		if !matchArtistName(query, a.Name) {
+			continue
+		}
+		tops, err := c.GetArtistsTopTracks(ctx, a.ID, "US")
+		if err != nil || len(tops) == 0 {
+			return nil, false
+		}
+		return makeTrackInfo(&tops[0]), true
+	}
+	return nil, false
+}
+
+// matchArtistName decides whether a free-text query is the kind of
+// close match to an artist's name that should switch resolveTrack into
+// artist mode. Conservative: requires case-insensitive equality after
+// trimming and collapsing internal whitespace. Anything looser risks
+// false positives ("nine" matching multiple "Nine ..." artists).
+func matchArtistName(query, name string) bool {
+	norm := func(s string) string {
+		return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(s))), " ")
+	}
+	return norm(query) != "" && norm(query) == norm(name)
 }
 
 // lookupSpotifyTracks batch-fetches track metadata for a list of Spotify
