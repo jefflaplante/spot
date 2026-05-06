@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,6 +28,51 @@ import (
 )
 
 const defaultVolumeStep = 5
+
+// Build-time version metadata. The Makefile injects these via
+// `-ldflags -X main.version=... -X main.commit=... -X main.buildDate=...`.
+// When built without ldflags (e.g. `go install` from a tarball), the
+// versionInfo helper falls back to runtime/debug.ReadBuildInfo, which
+// gives the VCS revision and time embedded by the Go toolchain.
+var (
+	version   = "dev"
+	commit    = ""
+	buildDate = ""
+)
+
+// versionInfo returns the version, commit SHA, and build date, falling
+// back to debug.ReadBuildInfo for any field the ldflags didn't supply.
+func versionInfo() (ver, sha, date string) {
+	ver, sha, date = version, commit, buildDate
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			if sha == "" {
+				sha = s.Value
+				if len(sha) > 12 {
+					sha = sha[:12]
+				}
+			}
+		case "vcs.time":
+			if date == "" {
+				date = s.Value
+			}
+		case "vcs.modified":
+			// Only append dirty marker when the version field doesn't
+			// already carry it (i.e., binary built without Makefile ldflags
+			// — `go install` from a local checkout). Avoids the redundant
+			// "v0.2.0-dirty / commit: abc-dirty" double-tag.
+			if s.Value == "true" && ver == "dev" && sha != "" && !strings.HasSuffix(sha, "-dirty") {
+				sha += "-dirty"
+			}
+		}
+	}
+	return
+}
 
 // jsonOutput is set by the persistent --json root flag and consumed by emit
 // in output.go.
@@ -356,6 +402,29 @@ func main() {
 				return err
 			}
 			return emit(okResult{OK: true, Command: "auth"}, nil)
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print version, commit SHA, and build date",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ver, sha, date := versionInfo()
+			return emit(struct {
+				Version   string `json:"version"`
+				Commit    string `json:"commit,omitempty"`
+				BuildDate string `json:"build_date,omitempty"`
+			}{Version: ver, Commit: sha, BuildDate: date}, func() error {
+				fmt.Printf("spot %s\n", ver)
+				if sha != "" {
+					fmt.Printf("  commit: %s\n", sha)
+				}
+				if date != "" {
+					fmt.Printf("  built:  %s\n", date)
+				}
+				return nil
+			})
 		},
 	})
 
